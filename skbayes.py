@@ -62,7 +62,8 @@ class Gaussian:
         self.n_classes = n_classes
 
     def sample(self, n_samples, random_state=None):
-        """        Sample from a Gaussian distribution.
+        """
+        Sample from a Gaussian distribution.
 
         Parameters
         ----------
@@ -263,30 +264,37 @@ if __name__ == "__main__":
     from sklearn.linear_model import LogisticRegression
 
     # Create a synthetic dataset
-    X, y = make_classification(n_samples=50, n_features=2, n_informative=2, n_redundant=0, random_state=42)
+    X, y = make_classification(n_samples=100, n_features=2, n_informative=2, n_redundant=0, random_state=42)
 
-    # Initialize a base measure as a Dirac mixture
-    base_measure = Gaussian(2, 2)
-    #base_measure = DiracMixture.from_gaussian(mu=np.zeros(2), sigma=np.eye(2), n_samples=200, n_classes=2, random_state=42)
+    # Initialize a base measure as a Dirac mixture on some of the training data mixed with some other uninformative data
+    X_uninformative = np.random.normal(loc=0.0, scale=5.0, size=(20, 2))
+    y_uninformative = np.random.randint(0, 2, size=20)
+    X_base = np.vstack([X[:10], X_uninformative])
+    y_base = np.hstack([y[:10], y_uninformative])
+    base_measure = DiracMixture(X_base, y_base)
 
-    # Initialize the base estimator
-    base_estimator = LogisticRegression(penalty=None)
+    X_train, y_train = X[10:50], y[10:50]
 
-    # Initialize the GenBayesClassifier
-    model = GenBayesClassifier(base_estimator=base_estimator, base_measure=base_measure, n_estimators=1000, alpha=10, random_state=41)
+    for k in [1, 5, 10, 20, 40]:
+        print(f"GenBayesClassifier with k={k}:")
+        # Initialize the base estimator
+        base_estimator = LogisticRegression(penalty=None)
 
-    # Fit the model
-    model.fit(X, y)
+        # Initialize the GenBayesClassifier
+        model = GenBayesClassifier(base_estimator=base_estimator, base_measure=base_measure, n_estimators=1000, alpha=10, random_state=41)
 
-    # Predict class labels
-    predictions = model.predict_proba(X)
+        # Fit the model
+        model.fit(X_train[:k], y_train[:k])
 
-    # Print the AUC
-    from sklearn.metrics import roc_auc_score
-    auc = roc_auc_score(y, predictions[:, 1])
-    print(f"AUC: {auc:.4f}")
+        # Predict class labels
+        predictions = model.predict_proba(X[50:])
 
-    # Print the negative log likelihood
-    from sklearn.metrics import log_loss
-    nll = log_loss(y, predictions)
-    print(f"Negative Log Likelihood: {nll:.4f}")
+        # Print the AUC
+        from sklearn.metrics import roc_auc_score
+        auc = roc_auc_score(y[50:], predictions[:, 1])
+        print(f"\tAUC: {auc:.4f}")
+
+        # Print the negative log likelihood
+        from sklearn.metrics import log_loss
+        nll = log_loss(y[50:], predictions)
+        print(f"\tNegative Log Likelihood: {nll:.4f}")
