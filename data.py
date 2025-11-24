@@ -4,6 +4,7 @@ import json
 from pydantic import BaseModel, Field
 from typing import Any, List, Tuple
 import numpy as np
+import pandas as pd
 
 class Dataset(BaseModel):
     """
@@ -155,16 +156,79 @@ def convert_arff(input_path: str, output_path: str):
 
         data.append(data_point)
 
-    dataset = Dataset(domain=meta_data.field, description=meta_data.description, feature_schema=feature_schema, target_schema=target_schema, data=data)
+    dataset = Dataset(domain=meta_data.field, description=meta_data.description, feature_schema=feature_schema, target_schema=target_schema, data=data, name=meta_data.name, info="", reasoning=None)
 
     save_dataset(dataset, output_path)
 
+def convert_csv(input_path: str, output_path: str):
+    """
+    Convert a CSV dataset to a JSON dataset. Leaves the metadata fields empty.
+
+    Args:
+        input_path (str): Path to the input CSV file.
+        output_path (str): Path to save the output JSON file.
+    """
+    df = pd.read_csv(input_path)
+    
+    feature_schema = {
+        "type": "object",
+        "properties": {},
+        "required": list(df.columns[:-1])
+    }
+
+    for col in df.columns[:-1]:
+        # Do some basic type inference
+        if pd.api.types.is_numeric_dtype(df[col]):
+            feature_schema["properties"][col] = {
+                "type": "number",
+                "description": ""
+            }
+        else:
+            feature_schema["properties"][col] = {
+                "type": "string",
+                "description": "",
+                "enum": df[col].dropna().unique().tolist()
+            }
+
+    target_schema = {
+        "type": "object",
+        "properties": {
+            df.columns[-1]: {
+                "type": "string",
+                "description": "",
+                "enum": df[df.columns[-1]].dropna().unique().tolist()
+            }
+        },
+        "required": [df.columns[-1]]
+    }
+    
+    data = df.to_dict(orient='records')
+    dataset = Dataset(
+        name="",
+        info="",
+        domain="",
+        description="",
+        feature_schema=feature_schema,
+        target_schema=target_schema,
+        data=data,
+        reasoning=None
+    )
+    
+    save_dataset(dataset, output_path)
+    
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Load and save datasets.")
-    parser.add_argument("--input-path", type=str, help="Path to the input ARFF dataset file.")
+    parser.add_argument("--input-path", type=str, help="Path to the input dataset file.")
     parser.add_argument("--output-path", type=str, help="Path to save the output JSON dataset file.")
+    parser.add_argument("--format", type=str, choices=["arff", "csv"], default="arff", help="Format of the input dataset file.")
     args = parser.parse_args()
     
-    convert_arff(args.input_path, args.output_path)
+    if args.format == "arff":
+        convert_arff(args.input_path, args.output_path)
+    elif args.format == "csv":
+        # Placeholder for CSV conversion logic
+        pass
+    else:
+        raise ValueError(f"Unsupported format: {args.format}")
