@@ -228,7 +228,6 @@ if __name__ == "__main__":
     if args.format == "arff":
         convert_arff(args.input_path, args.output_path)
     elif args.format == "csv":
-        # Placeholder for CSV conversion logic
-        pass
+        convert_csv(args.input_path, args.output_path)
     else:
         raise ValueError(f"Unsupported format: {args.format}")
