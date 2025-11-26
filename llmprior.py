@@ -158,39 +158,50 @@ def sample_data(dataset: Dataset, model_name: str, num_samples: int, reasoning: 
     if verbose:
         print(f"Initialized LLMSampler with model: {model_name}")
 
-    if features == "uniform":
+    if features == "uniform" or features == "uniform-llm-bounds":
         if verbose:
             print("Using uniform marginals.")
-            print("Querying LLM for minimum and maximum values of numeric attributes.")
         
         maxes = {}
         mins = {}
-        min_max_schema = JsonSchema({
-            "type": "object",
-            "properties": {
-                "minimum": {"type": "number", "description": "The minimum value of the feature."},
-                "maximum": {"type": "number", "description": "The maximum value of the feature."}
-            },
-            "required": ["minimum", "maximum"]
-        })
 
-        for feature_name, feature_schema in dataset.feature_schema["properties"].items():
-            if feature_schema["type"] == "number":
-                input_str = format(f"What are reasonable minimum and maximum values for the numeric feature '{feature_name}'?")
-                response = sampler.sample(input_str, min_max_schema)
-                try:
-                    if verbose:
-                        print(response)
+        if features == "uniform-llm-bounds":
+            if verbose:
+                print("Querying LLM for minimum and maximum values of numeric attributes.")
 
-                    response_json = json.loads(response)
-                    mins[feature_name] = float(response_json["minimum"])
-                    maxes[feature_name] = float(response_json["maximum"])
-                except Exception as e:
-                    if verbose:
-                        print(f"Error parsing min/max for feature {feature_name}: {e}")
+            min_max_schema = JsonSchema({
+                "type": "object",
+                "properties": {
+                    "minimum": {"type": "number", "description": "The minimum value of the feature."},
+                    "maximum": {"type": "number", "description": "The maximum value of the feature."}
+                },
+                "required": ["minimum", "maximum"]
+            })
 
-                    mins[feature_name] = 0.0
-                    maxes[feature_name] = 1.0
+            for feature_name, feature_schema in dataset.feature_schema["properties"].items():
+                if feature_schema["type"] == "number":
+                    input_str = format(f"What are reasonable minimum and maximum values for the numeric feature '{feature_name}'?")
+                    response = sampler.sample(input_str, min_max_schema)
+                    try:
+                        if verbose:
+                            print(response)
+
+                        response_json = json.loads(response)
+                        mins[feature_name] = float(response_json["minimum"])
+                        maxes[feature_name] = float(response_json["maximum"])
+                    except Exception as e:
+                        if verbose:
+                            print(f"Error parsing min/max for feature {feature_name}: {e}")
+
+                        mins[feature_name] = 0.0
+                        maxes[feature_name] = 1.0
+        else:
+            # Get the mins and maxes from the stored data
+            for feature_name, feature_schema in dataset.feature_schema["properties"].items():
+                if feature_schema["type"] == "number":
+                    values = [record[feature_name] for record in dataset.data if feature_name in record]
+                    mins[feature_name] = float(np.min(values))
+                    maxes[feature_name] = float(np.max(values))
 
         if verbose:
             print("Sampling marginals using uniform distribution within the estimated ranges.")
@@ -267,7 +278,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-name", type=str, required=True, help="Name of the LLM model to use")
     parser.add_argument("--num-samples", type=int, default=128, help="Number of samples to generate")
     parser.add_argument("--reasoning", action='store_true', help="Whether to include reasoning in conditional sampling")
-    parser.add_argument("--features", choices=["uniform", "llm"], default="uniform", help="Feature sampling strategy")
+    parser.add_argument("--features", choices=["uniform", "uniform-llm-bounds", "llm"], default="uniform", help="Feature sampling strategy")
     parser.add_argument("--max-tokens", type=int, default=1024, help="Maximum number of tokens to generate in each sample")
     parser.add_argument("--input-path", type=str, required=True, help="Path to input JSON file containing the dataset")
     parser.add_argument("--output-path", type=str, required=True, help="Path to output JSON file to save the samples")
