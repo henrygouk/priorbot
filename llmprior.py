@@ -7,6 +7,7 @@ import outlines
 from outlines.types.dsl import JsonSchema
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from typing import Any, Optional
+import torch
 
 class LLMSampler:
 
@@ -72,6 +73,7 @@ class LLMSampler:
 
                 try:
                     result = json.loads(sample)
+                    break
                 except json.JSONDecodeError as e:
                     print(f"Error decoding JSON: {e}. Sample: {sample}")
                     result = {}
@@ -101,7 +103,7 @@ class LocalLLMSampler(LLMSampler):
         super().__init__(**kwargs)
 
         hf_model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
-        hf_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        hf_tokenizer = AutoTokenizer.from_pretrained(model_name, device_map="auto")
 
         model = outlines.from_transformers(
             hf_model,
@@ -263,7 +265,7 @@ def sample_data_cached(dataset: Dataset, model_name: str, num_samples: int, reas
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LLM Prior Sampler")
     parser.add_argument("--model-name", type=str, required=True, help="Name of the LLM model to use")
-    parser.add_argument("--num-samples", type=int, default=512, help="Number of samples to generate")
+    parser.add_argument("--num-samples", type=int, default=128, help="Number of samples to generate")
     parser.add_argument("--reasoning", action='store_true', help="Whether to include reasoning in conditional sampling")
     parser.add_argument("--features", choices=["uniform", "llm"], default="uniform", help="Feature sampling strategy")
     parser.add_argument("--max-tokens", type=int, default=1024, help="Maximum number of tokens to generate in each sample")

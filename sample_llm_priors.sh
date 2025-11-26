@@ -14,6 +14,7 @@ else
     echo "Generating samples without reasoning using model: $MODEL_NAME"
 fi
 
+samples_dir=$OUTPUT_DIR/$MODEL_NAME
 mkdir -p "$samples_dir"
 
 # Iterate over these files
@@ -30,16 +31,16 @@ for file in $input_files; do
 
     # Use the LLM to generate samples
     if [ "$REASONING" = "true" ]; then
-        python -m llm_priors.sample_llm_priors \
+        uv run llmprior.py \
             --model-name "$MODEL_NAME" \
-            --input-file "$file" \
-            --output-file "$output_file" \
+            --input-path "$file" \
+            --output-path "$output_file" \
             --reasoning
     else
-        python -m llm_priors.sample_llm_priors \
+        uv run llmprior.py \
             --model-name "$MODEL_NAME" \
-            --input-file "$file" \
-            --output-file "$output_file"
+            --input-path "$file" \
+            --output-path "$output_file"
     fi
 
     echo "Samples saved to $output_file"
