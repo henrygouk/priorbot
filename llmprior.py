@@ -3,6 +3,7 @@ import argparse
 from data import Dataset, load_dataset, save_dataset
 import json
 import numpy as np
+from openai import OpenAI
 import outlines
 from outlines.types.dsl import JsonSchema
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -16,7 +17,7 @@ class LLMSampler:
         self.system_prompt = system_prompt
 
     @abstractmethod
-    def sample(self, prompt: str, output_type: JsonSchema) -> str:
+    def sample(self, prompt: str, output_type: dict[str, Any]) -> str:
         pass
 
     def sample_marginal(self, n_samples: int, marginal_schema: dict[str, Any], verbose: bool = False) -> list[dict[str, Any]]:
@@ -24,7 +25,7 @@ class LLMSampler:
         input_str = format(f"Generate a data point that conforms to the following schema: {marginal_schema}")
 
         while len(samples) < n_samples:
-            sample = self.sample(input_str, JsonSchema(marginal_schema))
+            sample = self.sample(input_str, marginal_schema)
 
             try:
                 result = json.loads(sample)
@@ -69,7 +70,7 @@ class LLMSampler:
 
             for _ in range(attempts):
                 input_str = format(f"Given features with these values: {marginal}, estimate the {value} of {field}. Your response should conform to the following schema: {conditional_schema}")
-                sample = self.sample(input_str, JsonSchema(conditional_schema))
+                sample = self.sample(input_str, conditional_schema)
 
                 try:
                     result = json.loads(sample)
@@ -114,15 +115,47 @@ class LocalLLMSampler(LLMSampler):
         self.hf_model = hf_model
         self.hf_tokenizer = hf_tokenizer
 
-    def sample(self, prompt: str, output_type: JsonSchema) -> str:
+    def sample(self, prompt: str, output_type: dict[str, Any]) -> str:
         chat = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": prompt}
         ]
 
         input = self.hf_tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
-        output = self.model(input, output_type, max_new_tokens=self.max_tokens)
+        output = self.model(input, JsonSchema(output_type), max_new_tokens=self.max_tokens)
         return output
+
+class OpenAILLMSampler(LLMSampler):
+    """
+    A sampler that uses an OpenAI-compatible API to sample from a prior distribution.
+    """
+
+    def __init__(self, base_url: str, model_name: str, **kwargs):
+        super().__init__(**kwargs)
+        self.base_url = base_url
+        self.model_name = model_name
+        self.client = OpenAI(base_url=self.base_url)
+
+    def sample(self, prompt: str, output_type: dict[str, Any]) -> str:
+        chat = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": prompt}
+        ]
+
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=chat,
+            max_tokens=self.max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "output",
+                    "schema": output_type
+                }
+            }
+        )
+
+        return response.choices[0].message.content
 
 def sample_marginal_uniform(n_samples: int, marginal_schema: dict[str, Any], maxes: dict[str, float], mins: dict[str, float]) -> list[dict[str, Any]]:
     """
@@ -149,11 +182,14 @@ def sample_marginal_uniform(n_samples: int, marginal_schema: dict[str, Any], max
         samples.append(sample)
     return samples
 
-def sample_data(dataset: Dataset, model_name: str, num_samples: int, reasoning: bool, features: str, max_tokens: int, verbose: bool = False) -> Dataset:
+def sample_data(dataset: Dataset, base_url: str | None, model_name: str, num_samples: int, reasoning: bool, features: str, max_tokens: int, verbose: bool = False) -> Dataset:
     system_prompt =  f"You are an expert in the field of {dataset.domain}.\n"
     system_prompt += f"Your top priority is to provide statisticians with the domain knowedge required to analyse their data. {dataset.description}\n"
 
-    sampler = LocalLLMSampler(model_name=model_name, max_tokens=max_tokens, system_prompt=system_prompt)
+    if base_url is None:
+        sampler = LocalLLMSampler(model_name=model_name, max_tokens=max_tokens, system_prompt=system_prompt)
+    else:
+        sampler = OpenAILLMSampler(base_url=base_url, model_name=model_name, max_tokens=max_tokens, system_prompt=system_prompt)
 
     if verbose:
         print(f"Initialized LLMSampler with model: {model_name}")
@@ -169,14 +205,14 @@ def sample_data(dataset: Dataset, model_name: str, num_samples: int, reasoning: 
             if verbose:
                 print("Querying LLM for minimum and maximum values of numeric attributes.")
 
-            min_max_schema = JsonSchema({
+            min_max_schema = {
                 "type": "object",
                 "properties": {
                     "minimum": {"type": "number", "description": "The minimum value of the feature."},
                     "maximum": {"type": "number", "description": "The maximum value of the feature."}
                 },
                 "required": ["minimum", "maximum"]
-            })
+            }
 
             for feature_name, feature_schema in dataset.feature_schema["properties"].items():
                 if feature_schema["type"] == "number":
@@ -276,12 +312,14 @@ def sample_data_cached(dataset: Dataset, model_name: str, num_samples: int, reas
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LLM Prior Sampler")
     parser.add_argument("--model-name", type=str, required=True, help="Name of the LLM model to use")
+    parser.add_argument("--base-url", type=str, help="Base URL for OpenAI-compatible API")
     parser.add_argument("--num-samples", type=int, default=128, help="Number of samples to generate")
     parser.add_argument("--reasoning", action='store_true', help="Whether to include reasoning in conditional sampling")
     parser.add_argument("--features", choices=["uniform", "uniform-llm-bounds", "llm"], default="uniform", help="Feature sampling strategy")
     parser.add_argument("--max-tokens", type=int, default=1024, help="Maximum number of tokens to generate in each sample")
     parser.add_argument("--input-path", type=str, required=True, help="Path to input JSON file containing the dataset")
     parser.add_argument("--output-path", type=str, required=True, help="Path to output JSON file to save the samples")
+    parser.add_argument("--verbose", action='store_true', help="Whether to print verbose output during sampling")
     args = parser.parse_args()
 
     dataset = load_dataset(args.input_path)
@@ -289,12 +327,13 @@ if __name__ == "__main__":
 
     output_data = sample_data(
             dataset=dataset,
+            base_url=args.base_url,
             model_name=args.model_name,
             num_samples=args.num_samples,
             reasoning=args.reasoning,
             features=args.features,
             max_tokens=args.max_tokens,
-            verbose=True
+            verbose=args.verbose
         )
 
     save_dataset(output_data, args.output_path)
