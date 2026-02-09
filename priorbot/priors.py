@@ -1,9 +1,7 @@
 from abc import abstractmethod
-import argparse
-from data import Dataset, load_dataset, save_dataset
 import json
 import numpy as np
-from typing import Any, Optional
+from typing import Any
 from .llm import LLM
 
 class Prior:
@@ -72,18 +70,8 @@ class LLMPrior(Prior):
             if verbose:
                 print("LLM returned None. Returning empty dict.")
             return {}
-
-        try:
-            result = json.loads(output)
-            return result
-        except json.JSONDecodeError as e:
-            if verbose:
-                print(f"Error decoding JSON: {e}. Output: {output}")
-            return {}
-        except Exception as e:
-            if verbose:
-                print(f"Unexpected error: {e}. Output: {output}")
-            return {}
+        else:
+            return output
 
 class GibbsSamplingPrior(Prior):
     def __init__(self, base_prior: Prior, burn_in: int = 10, thinning: int = 1):
