@@ -66,9 +66,9 @@ class LLMPrior(Prior):
     def _sample_impl(self, input_str: str, schema: dict[str, Any], verbose: bool) -> dict[str, Any]:
         output = self.llm.generate(input_str, schema)
 
-        if output is None:
+        if type(output) is not dict:
             if verbose:
-                print("LLM returned None. Returning empty dict.")
+                print(f"LLM returned invalid output {output}. Returning empty dict.")
             return {}
         else:
             return output
@@ -105,6 +105,69 @@ class GibbsSamplingPrior(Prior):
             all_observed = {**itr_observed, **observed}
             new_sample = self.base_prior.sample_conditional(itr_schema, all_observed, verbose)
             samples.append(new_sample)
+
+        thinned_samples = samples[self.burn_in::self.thinning][:n_samples]
+        return thinned_samples
+
+class MCMCLLMPrior(Prior):
+    """
+    Use the Markov Chain Monta Carlo with People approach to sampling from the LLM. This uses the LLM to decide whether
+    candidates in an MCMC chain should be accepted or rejected. This method relies on the proposal distribution being
+    approximately uniform.
+    """
+
+    def __init__(self, llm: LLM, burn_in: int = 10, thinning: int = 1):
+        self.llm = llm
+        self.proposal_dist = UniformPrior()
+        self.burn_in = burn_in
+        self.thinning = thinning
+
+    def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False) -> list[dict[str, Any]]:
+        return self._sample_impl(n_samples, schema, {}, verbose)
+
+    def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
+        samples = self._sample_impl(1, schema, observed, verbose)
+        return samples[0]
+
+    def _sample_impl(self, n_samples: int, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> list[dict[str, Any]]:
+        samples = [self.proposal_dist.sample_conditional(schema, observed, verbose)]
+
+        for _ in range(self.burn_in + n_samples * self.thinning):
+            candidate = self.proposal_dist.sample_conditional(schema, observed, verbose)
+
+            if np.random.choice([True, False]):
+                options = [samples[-1], candidate]
+            else:
+                options = [candidate, samples[-1]]
+
+            binary_schema = {
+                "type": "object",
+                "properties": {
+                    "choice": {
+                        "type": "string",
+                        "enum": ["Option 1", "Option 2"]
+                    }
+                }
+            }
+
+            input_str = format(f"Given the observed features with these values: {observed}, and the following schema: {schema}, which of the following two options is more likely to be a valid data point? Option 1: {options[0]}. Option 2: {options[1]}. Respond in the format specified by this schema: {binary_schema}.")
+            output = self.llm.generate(input_str, binary_schema)
+
+            if type(output) is not dict or "choice" not in output:
+                if verbose:
+                    print(f"LLM returned invalid output {output}. Rejecting candidate.")
+                samples.append(samples[-1])
+            elif output.get("choice") == "Option 1":
+                samples.append(options[0])
+            elif output.get("choice") == "Option 2":
+                samples.append(options[1])
+            else:
+                if verbose:
+                    print(f"LLM returned invalid output {output}. Rejecting candidate.")
+                samples.append(samples[-1])
+
+            if verbose:
+                print(f"Generated {len(samples[self.burn_in::self.thinning][:n_samples])}/{n_samples} samples.")
 
         thinned_samples = samples[self.burn_in::self.thinning][:n_samples]
         return thinned_samples
