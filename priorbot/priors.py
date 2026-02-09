@@ -1,5 +1,4 @@
 from abc import abstractmethod
-import json
 import numpy as np
 from typing import Any
 from .llm import LLM
