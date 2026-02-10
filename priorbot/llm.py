@@ -52,7 +52,7 @@ class OpenAICompatLLM(LLM):
         super().__init__(model_name, **kwargs)
         self.base_url = base_url
         self.system_prompt = system_prompt
-        self.client = OpenAI(api_base=base_url, **kwargs.get("openai_args", {}))
+        self.client = OpenAI(base_url=base_url, **kwargs.get("openai_args", {}))
 
     def generate(self, prompt: str, output_type: None | dict[str, Any] = None) -> Optional[str | dict[str, Any]]:
         """
@@ -77,20 +77,14 @@ class OpenAICompatLLM(LLM):
                     "schema": output_type,
                 }
             }
-        else:
-            response_format = None
 
-        if response_format:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=chat,
                 response_format=response_format,
             )
 
-            try:
-                return json.loads(response.choices[0].message.content)
-            except Exception as e:
-                raise ValueError(f"Failed to parse response as JSON: {response.choices[0].message.content}") from e
+            return json.loads(response.choices[0].message.content)
         else:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -171,3 +165,34 @@ class OutlinesLocalLLM(LLM):
         output = self.model(input_ids, JsonSchema(output_type) if output_type else str)
         return output
 
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser()
+    parser.add_argument("--model-name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
+    parser.add_argument("--base-url", type=str, default=None)
+    args = parser.parse_args()
+
+    if args.base_url:
+        llm = OpenAICompatLLM(
+            model_name=args.model_name,
+            base_url=args.base_url,
+            system_prompt="You are a helpful assistant that generates data points conforming to a given schema.",
+        )
+    else:
+        llm = OutlinesLocalLLM(
+            model_name=args.model_name,
+            system_prompt="You are a helpful assistant that generates data points conforming to a given schema.",
+        )
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"}
+        },
+        "required": ["name", "age"]
+    }
+
+    response = llm.generate(f"Generate a data point that conforms to the following schema: {schema}", output_type=schema)
+    print(response)

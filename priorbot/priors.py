@@ -44,7 +44,7 @@ class LLMPrior(Prior):
 
     def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False) -> list[dict[str, Any]]:
         samples = []
-        input_str = format(f"Generate a data point that conforms to the following schema: {schema}")
+        input_str = f"Generate a data point that conforms to the following schema: {schema}"
         
         while len(samples) < n_samples:
             sample = self._sample_impl(input_str, schema, verbose)
@@ -58,12 +58,12 @@ class LLMPrior(Prior):
         return samples
 
     def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        input_str = format(f"Given the observed features with these values: {observed}, generate a data point that conforms to the following schema: {schema}")
+        input_str = "Given the observed features with these values: {observed}, generate a data point that conforms to the following schema: {schema}"
         sample = self._sample_impl(input_str, schema, verbose)
         return sample
     
     def _sample_impl(self, input_str: str, schema: dict[str, Any], verbose: bool) -> dict[str, Any]:
-        output = self.llm.generate(input_str, schema)
+        output = self.llm.generate(input_str, output_type=schema)
 
         if type(output) is not dict:
             if verbose:
@@ -206,3 +206,39 @@ class EmpiricalPrior(Prior):
         # Can't do conditional sampling properly---we will just have to ignore conditioned observations
         return self.sample(n_samples=1, schema=schema, verbose=verbose)[0]
 
+if __name__ == "__main__":
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser()
+    parser.add_argument("--base-url", type=str, default="http://localhost:8000")
+    parser.add_argument("--model-name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
+    parser.add_argument("--gibbs", action="store_true", help="Whether to use Gibbs sampling.")
+    args = parser.parse_args()
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "color": {
+                "type": "string",
+                "enum": ["red", "green", "blue"]
+            },
+            "shape": {
+                "type": "string",
+                "enum": ["circle", "square", "triangle"]
+            }
+        }
+    }
+
+    from .llm import OpenAICompatLLM
+
+    prior = LLMPrior(llm=OpenAICompatLLM(
+        base_url=args.base_url,
+        model_name=args.model_name,
+        system_prompt="You are a helpful assistant for generating data points that conform to a given schema."
+    ))
+
+    if args.gibbs:
+        prior = GibbsSamplingPrior(base_prior=prior)
+
+    samples = prior.sample(5, schema, verbose=True)
+    print(samples)
