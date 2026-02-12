@@ -27,7 +27,7 @@ class UniformPrior(Prior):
 
             for key, value in schema["properties"].items():
                 if value["type"] == "string" and "enum" in value:
-                    sample[key] = np.random.choice(value["enum"])
+                    sample[key] = np.random.choice(value["enum"]).item()
                 else:
                     raise ValueError(f"Unsupported type {value.type} for key {key}")
 
@@ -90,6 +90,7 @@ class GibbsSamplingPrior(Prior):
 
         for _ in range(self.burn_in + n_samples * self.thinning):
             itr_observed = samples[-1].copy()
+            print(itr_observed)
             key_to_discard = np.random.choice(list(itr_observed.keys()))
             itr_observed.pop(key_to_discard)
             
@@ -98,11 +99,12 @@ class GibbsSamplingPrior(Prior):
                 "properties": {
                     key_to_discard: schema["properties"][key_to_discard]
                 },
-                "required": [key_to_discard] if key_to_discard in schema.get("required", []) else []
+                "required": [key_to_discard]
             }
 
             all_observed = {**itr_observed, **observed}
-            new_sample = self.base_prior.sample_conditional(itr_schema, all_observed, verbose)
+            new_marginal = self.base_prior.sample_conditional(itr_schema, all_observed, verbose)
+            new_sample = itr_observed | new_marginal
             samples.append(new_sample)
 
         thinned_samples = samples[self.burn_in::self.thinning][:n_samples]
@@ -149,7 +151,11 @@ class MCMCLLMPrior(Prior):
                 }
             }
 
-            input_str = format(f"Given the observed features with these values: {observed}, and the following schema: {schema}, which of the following two options is more likely to be a valid data point? Option 1: {options[0]}. Option 2: {options[1]}. Respond in the format specified by this schema: {binary_schema}.")
+            if observed:
+                input_str = format(f"Given the observed features with these values: {observed}, and the following schema: {schema}, which of the following two options is more likely to be a valid data point? Option 1: {options[0]}. Option 2: {options[1]}. Respond in the format specified by this schema: {binary_schema}.")
+            else:
+                input_str = format(f"Which of the following two options is more likely? Option 1: {options[0]}. Option 2: {options[1]}. Respond in the format specified by this schema: {binary_schema}.")
+
             output = self.llm.generate(input_str, binary_schema)
 
             if type(output) is not dict or "choice" not in output:
@@ -213,32 +219,47 @@ if __name__ == "__main__":
     parser.add_argument("--base-url", type=str, default="http://localhost:8000")
     parser.add_argument("--model-name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     parser.add_argument("--gibbs", action="store_true", help="Whether to use Gibbs sampling.")
+    parser.add_argument("--mcmc", action="store_true", help="Whether to use MCMC with People sampling.")
     args = parser.parse_args()
 
     schema = {
         "type": "object",
         "properties": {
-            "color": {
+            "Distillery": {
                 "type": "string",
-                "enum": ["red", "green", "blue"]
+                "enum": ["Glenfiddich", "Macallan", "Lagavulin", "Laphroaig", "Ardbeg"]
             },
-            "shape": {
+            "Age": {
                 "type": "string",
-                "enum": ["circle", "square", "triangle"]
+                "enum": ["12", "15", "18", "21", "25"]
+            },
+            "Region": {
+                "type": "string",
+                "enum": ["Speyside", "Islay", "Highland", "Lowland", "Campbeltown"]
             }
         }
     }
 
+    system_prompt = "You are a data scientist and whisky connoisseur ready to answer some questions about the range of whisky available at Tesco."
+
     from .llm import OpenAICompatLLM
 
-    prior = LLMPrior(llm=OpenAICompatLLM(
-        base_url=args.base_url,
-        model_name=args.model_name,
-        system_prompt="You are a helpful assistant for generating data points that conform to a given schema."
-    ))
+    if args.mcmc:
+        prior = MCMCLLMPrior(llm=OpenAICompatLLM(
+                base_url=args.base_url,
+                model_name=args.model_name, 
+                system_prompt=system_prompt
+            )
+        )
+    else:
+        prior = LLMPrior(llm=OpenAICompatLLM(
+            base_url=args.base_url,
+            model_name=args.model_name,
+            system_prompt=system_prompt
+        ))
 
-    if args.gibbs:
-        prior = GibbsSamplingPrior(base_prior=prior)
+        if args.gibbs:
+            prior = GibbsSamplingPrior(base_prior=prior)
 
-    samples = prior.sample(5, schema, verbose=True)
+    samples = prior.sample(10, schema, verbose=True)
     print(samples)
