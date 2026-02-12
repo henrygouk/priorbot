@@ -51,40 +51,6 @@ wheels = [
 ]
 
 [[package]]
-name = "autoprior"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "pydantic" },
-    { name = "scikit-learn" },
-]
-
-[package.optional-dependencies]
-local-llm = [
-    { name = "accelerate" },
-    { name = "outlines" },
-    { name = "transformers" },
-]
-remote-llm = [
-    { name = "openai" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", marker = "extra == 'local-llm'", specifier = ">=1.11.0" },
-    { name = "numpy", specifier = ">=2.3.4" },
-    { name = "openai", marker = "extra == 'remote-llm'", specifier = ">=2.17.0" },
-    { name = "outlines", marker = "extra == 'local-llm'", specifier = ">=1.2.7" },
-    { name = "pandas", specifier = ">=2.3.3" },
-    { name = "pydantic", specifier = ">=2.12.3" },
-    { name = "scikit-learn", specifier = ">=1.7.2" },
-    { name = "transformers", marker = "extra == 'local-llm'", specifier = ">=4.57.1" },
-]
-provides-extras = ["local-llm", "remote-llm"]
-
-[[package]]
 name = "certifi"
 version = "2025.10.5"
 source = { registry = "https://pypi.org/simple" }
@@ -815,6 +781,40 @@ sdist = { url = "https://files.pythonhosted.org/packages/e5/69/882ee5c9d01714928
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a3/58/35da89ee790598a0700ea49b2a66594140f44dec458c07e8e3d4979137fc/ply-3.11-py2.py3-none-any.whl", hash = "sha256:096f9b8350b65ebd2fd1346b12452efe5b9607f7482813ffca50c22722a807ce", size = 49567, upload-time = "2018-02-15T19:01:27.172Z" },
 ]
+
+[[package]]
+name = "priorbot"
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pydantic" },
+    { name = "scikit-learn" },
+]
+
+[package.optional-dependencies]
+local-llm = [
+    { name = "accelerate" },
+    { name = "outlines" },
+    { name = "transformers" },
+]
+remote-llm = [
+    { name = "openai" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", marker = "extra == 'local-llm'", specifier = ">=1.11.0" },
+    { name = "numpy", specifier = ">=2.3.4" },
+    { name = "openai", marker = "extra == 'remote-llm'", specifier = ">=2.17.0" },
+    { name = "outlines", marker = "extra == 'local-llm'", specifier = ">=1.2.7" },
+    { name = "pandas", specifier = ">=2.3.3" },
+    { name = "pydantic", specifier = ">=2.12.3" },
+    { name = "scikit-learn", specifier = ">=1.7.2" },
+    { name = "transformers", marker = "extra == 'local-llm'", specifier = ">=4.57.1" },
+]
+provides-extras = ["local-llm", "remote-llm"]
 
 [[package]]
 name = "psutil"
