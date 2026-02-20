@@ -45,6 +45,40 @@ def save_dataset(dataset: Dataset, file_path: str):
     with open(file_path, 'w') as f:
         f.write(dataset.model_dump_json(indent=2))
 
+def split_dataset(dataset: Dataset, train_fraction: float) -> Tuple[Dataset, Dataset]:
+    """
+    Split a dataset into training and testing sets.
+    Args:
+        dataset (Dataset): The dataset to split.
+        train_fraction (float): The fraction of the dataset to use for training (between 0 and 1).
+    Returns:
+        Tuple[Dataset, Dataset]: A tuple containing the training and testing datasets.
+    """
+    n_train = int(len(dataset.data) * train_fraction)
+    train_data = dataset.data[:n_train]
+    test_data = dataset.data[n_train:]
+    train_dataset = Dataset(
+        name=dataset.name + " (train)",
+        info=dataset.info,
+        domain=dataset.domain,
+        description=dataset.description,
+        feature_schema=dataset.feature_schema,
+        target_schema=dataset.target_schema,
+        data=train_data,
+        reasoning=dataset.reasoning[:n_train] if dataset.reasoning else None
+    )
+    test_dataset = Dataset(
+        name=dataset.name + " (test)",
+        info=dataset.info,
+        domain=dataset.domain,
+        description=dataset.description,
+        feature_schema=dataset.feature_schema,
+        target_schema=dataset.target_schema,
+        data=test_data,
+        reasoning=dataset.reasoning[n_train:] if dataset.reasoning else None
+    )
+    return train_dataset, test_dataset
+
 @dataclass
 class ARFFAttribute:
     name: str

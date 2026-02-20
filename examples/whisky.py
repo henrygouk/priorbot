@@ -1,5 +1,5 @@
 from priorbot.llm import OpenAICompatLLM
-from priorbot.priors import LLMPrior, GibbsSamplingPrior, MCMCLLMPrior
+from priorbot.priors import LLMPrior, GibbsSamplingPrior, MCMCAcceptanceFn, MCMCLLMPrior
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
@@ -20,23 +20,25 @@ if __name__ == "__main__":
             },
             "Age": {
                 "type": "string",
-                "enum": ["12", "15", "18", "21", "25"]
+                "enum": ["10", "12", "16", "18", "25"]
             },
             "Region": {
                 "type": "string",
-                "enum": ["Speyside", "Islay", "Highland", "Lowland", "Campbeltown"]
+                "enum": ["Speyside", "Islay"]
             }
         }
     }
 
-    system_prompt = "You are a data scientist and whisky connoisseur ready to answer some questions about the range of whisky available at Tesco."
+    system_prompt = "You are a data scientist and whisky expert tasked with investigating purchase records from a popular Scottish supermarket."
 
     if args.mcmc:
         prior = MCMCLLMPrior(llm=OpenAICompatLLM(
                 base_url=args.base_url,
                 model_name=args.model_name, 
                 system_prompt=system_prompt
-            )
+            ),
+            acceptance_fn=MCMCAcceptanceFn.BettingGame,
+            thinning=5
         )
     else:
         prior = LLMPrior(llm=OpenAICompatLLM(
@@ -46,7 +48,7 @@ if __name__ == "__main__":
         ))
 
         if args.gibbs:
-            prior = GibbsSamplingPrior(base_prior=prior)
+            prior = GibbsSamplingPrior(base_prior=prior, thinning=5)
 
     samples = prior.sample(10, schema, verbose=True)
     print(samples)

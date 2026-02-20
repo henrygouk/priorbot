@@ -1,6 +1,7 @@
 from abc import abstractmethod
 import numpy as np
 from typing import Any
+from enum import Enum
 from .llm import LLM
 
 class Prior:
@@ -39,8 +40,9 @@ class UniformPrior(Prior):
         return self.sample(1, schema, verbose)[0]
 
 class LLMPrior(Prior):
-    def __init__(self, llm: LLM):
+    def __init__(self, llm: LLM, manual_reasoning: bool = False):
         self.llm = llm
+        self.manual_reasoning = manual_reasoning
 
     def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False) -> list[dict[str, Any]]:
         samples = []
@@ -58,13 +60,29 @@ class LLMPrior(Prior):
         return samples
 
     def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        input_str = "Given the observed features with these values: {observed}, generate a data point that conforms to the following schema: {schema}"
+        input_str = f"Given the observed features with these values: {observed}, generate a data point that conforms to the following schema: {schema}"
         sample = self._sample_impl(input_str, schema, verbose)
         return sample
     
     def _sample_impl(self, input_str: str, schema: dict[str, Any], verbose: bool) -> dict[str, Any]:
-        output = self.llm.generate(input_str, output_type=schema)
+        if self.manual_reasoning:
+            schema = {
+                "type": "object",
+                "properties": {
+                    "reasoning": {
+                        "type": "string",
+                        "description": "A description of the data point in plain text, along with the reasons for choosing specific values. To be completed before the rest of the object is generated."
+                    },
+                    **schema["properties"]
+                },
+                "required": ["reasoning"] + schema["required"]
+            }
 
+        output = self.llm.generate(input_str, output_type=schema, verbose=verbose)
+
+        if self.manual_reasoning and type(output) is dict:
+            output.pop("reasoning", None)
+        
         if type(output) is not dict:
             if verbose:
                 print(f"LLM returned invalid output {output}. Returning empty dict.")
@@ -107,8 +125,16 @@ class GibbsSamplingPrior(Prior):
             new_sample = itr_observed | new_marginal
             samples.append(new_sample)
 
+            if verbose:
+                print(f"Generated {len(samples[self.burn_in::self.thinning][:n_samples])}/{n_samples} samples.")
+                print(f"Current sample: {samples[-1]}")
+
         thinned_samples = samples[self.burn_in::self.thinning][:n_samples]
         return thinned_samples
+
+class MCMCAcceptanceFn(Enum):
+    MCMCP = "MCMCP"
+    BettingGame = "BettingGame"
 
 class MCMCLLMPrior(Prior):
     """
@@ -117,11 +143,13 @@ class MCMCLLMPrior(Prior):
     approximately uniform.
     """
 
-    def __init__(self, llm: LLM, burn_in: int = 10, thinning: int = 1):
+    def __init__(self, llm: LLM, burn_in: int = 10, thinning: int = 1, manual_reasoning: bool = False, acceptance_fn: MCMCAcceptanceFn = MCMCAcceptanceFn.MCMCP):
         self.llm = llm
         self.proposal_dist = UniformPrior()
         self.burn_in = burn_in
         self.thinning = thinning
+        self.manual_reasoning = manual_reasoning
+        self.acceptance_fn = acceptance_fn
 
     def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False) -> list[dict[str, Any]]:
         return self._sample_impl(n_samples, schema, {}, verbose)
@@ -132,7 +160,7 @@ class MCMCLLMPrior(Prior):
 
     def _sample_impl(self, n_samples: int, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> list[dict[str, Any]]:
         samples = [self.proposal_dist.sample_conditional(schema, observed, verbose)]
-
+        
         for _ in range(self.burn_in + n_samples * self.thinning):
             candidate = self.proposal_dist.sample_conditional(schema, observed, verbose)
 
@@ -141,34 +169,18 @@ class MCMCLLMPrior(Prior):
             else:
                 options = [candidate, samples[-1]]
 
-            binary_schema = {
-                "type": "object",
-                "properties": {
-                    "choice": {
-                        "type": "string",
-                        "enum": ["Option 1", "Option 2"]
-                    }
-                }
-            }
-
-            if observed:
-                input_str = format(f"Given the observed features with these values: {observed}, and the following schema: {schema}, which of the following two options is more likely to be a valid data point? Option 1: {options[0]}. Option 2: {options[1]}. Respond in the format specified by this schema: {binary_schema}.")
-            else:
-                input_str = format(f"Which of the following two options is more likely? Option 1: {options[0]}. Option 2: {options[1]}. Respond in the format specified by this schema: {binary_schema}.")
-
-            output = self.llm.generate(input_str, binary_schema)
-
-            if type(output) is not dict or "choice" not in output:
+            try:
                 if verbose:
-                    print(f"LLM returned invalid output {output}. Rejecting candidate.")
-                samples.append(samples[-1])
-            elif output.get("choice") == "Option 1":
-                samples.append(options[0])
-            elif output.get("choice") == "Option 2":
-                samples.append(options[1])
-            else:
+                    print(f"Current sample: {samples[-1]}, Candidate: {candidate}")
+
+                if self._acceptance(options[0], options[1], schema, observed, verbose=verbose):
+                    samples.append(options[0])
+                else:
+                    samples.append(options[1])
+            except Exception as e:
                 if verbose:
-                    print(f"LLM returned invalid output {output}. Rejecting candidate.")
+                    print(f"Error during acceptance step: {e}. Rejecting candidate.")
+
                 samples.append(samples[-1])
 
             if verbose:
@@ -176,6 +188,80 @@ class MCMCLLMPrior(Prior):
 
         thinned_samples = samples[self.burn_in::self.thinning][:n_samples]
         return thinned_samples
+
+    def _acceptance(self, option1: dict[str, Any], option2: dict[str, Any], schema: dict[str, Any], observed: dict[str, Any] | None = None, verbose: bool = False) -> bool:
+        if self.acceptance_fn == MCMCAcceptanceFn.MCMCP:
+            return self._acceptance_mcmcp(option1, option2, schema, observed, verbose)
+        elif self.acceptance_fn == MCMCAcceptanceFn.BettingGame:
+            return self._acceptance_betting_game(option1, option2, schema, observed, verbose)
+        else:
+            raise ValueError(f"Unsupported acceptance function {self.acceptance_fn}")
+
+    def _acceptance_mcmcp(self, option1: dict[str, Any], option2: dict[str, Any], schema: dict[str, Any], observed: dict[str, Any] | None = None, verbose: bool = False) -> bool:
+        binary_schema = {
+            "type": "object",
+            "properties": {
+                "choice": {
+                    "type": "string",
+                    "enum": ["Option 1", "Option 2"]
+                }
+            }
+        }
+
+        if self.manual_reasoning:
+            binary_schema["properties"]["reasoning"] = {
+                "type": "string",
+                "description": "A description of the reasoning behind the choice, to be completed before the choice is made."
+            }
+
+        if observed:
+            input_str = format(f"Given the observed features with these values: {observed}, and the following schema: {schema}, which of the following two options is more likely to be a valid data point? Option 1: {option1}. Option 2: {option2}. Respond in the format specified by this schema: {binary_schema}.")
+        else:
+            input_str = format(f"Which of the following two options is more likely? Option 1: {option1}. Option 2: {option2}. Respond in the format specified by this schema: {binary_schema}.")
+
+        output = self.llm.generate(input_str, binary_schema, verbose=verbose)
+
+        return type(output) is dict and output.get("choice") == "Option 1"
+
+    def _acceptance_betting_game(self, option1: dict[str, Any], option2: dict[str, Any], schema: dict[str, Any], observed: dict[str, Any] | None = None, verbose: bool = False) -> bool:
+        """
+        Instead of asking the LLM to determine which point is most likely, we generate a random bet and ask the LLM which side of the bet they want to be on.
+        """
+        binary_schema = {
+            "type": "object",
+            "properties": {
+                "bet": {
+                    "type": "string",
+                    "enum": ["Place Bet", "Do Not Place Bet"]
+                }
+            }
+        }
+
+        if self.manual_reasoning:
+            binary_schema["properties"]["reasoning"] = {
+                "type": "string",
+                "description": "A description of the reasoning behind the bet, to be completed before the bet is made."
+            }
+
+        bet_value = np.round(np.random.rand() * 100, 2)
+
+        if observed:
+            input_str = format(
+                f"You will be presented with two sets of feature values for a data point, along with some observed "
+                f"features with these values: {observed}, and the following schema: {schema}. You have the opportunity"
+                f" to place a bet of ${bet_value} that Option 1 is more plausible, which will pay out $100 if you are "
+                f"correct. Your aim is to maximise profit. Option 1 is {option1} and Option 2 is {option2}. Respond in"
+                f" the format specified by this schema: {binary_schema}.")
+        else:
+            input_str = format(
+                f"You will be presented with two sets of feature values for a data point. You have the opportunity to"
+                f"place a bet of ${bet_value} that Option 1 is more plausible, which will pay out $100 if you are"
+                f"correct. Your aim is to maximise profit. Option 1 is {option1} and Option 2 is {option2}. Respond in"
+                f" the format specified by this schema: {binary_schema}.")
+
+        output = self.llm.generate(input_str, binary_schema, verbose=verbose)
+
+        return type(output) is dict and output.get("bet") == "Place Bet"
 
 class SplitJointConditionalPrior(Prior):
     def __init__(self, joint_prior: Prior, conditional_prior: Prior):
@@ -212,54 +298,3 @@ class EmpiricalPrior(Prior):
         # Can't do conditional sampling properly---we will just have to ignore conditioned observations
         return self.sample(n_samples=1, schema=schema, verbose=verbose)[0]
 
-if __name__ == "__main__":
-    from argparse import ArgumentParser
-
-    parser = ArgumentParser()
-    parser.add_argument("--base-url", type=str, default="http://localhost:8000")
-    parser.add_argument("--model-name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
-    parser.add_argument("--gibbs", action="store_true", help="Whether to use Gibbs sampling.")
-    parser.add_argument("--mcmc", action="store_true", help="Whether to use MCMC with People sampling.")
-    args = parser.parse_args()
-
-    schema = {
-        "type": "object",
-        "properties": {
-            "Distillery": {
-                "type": "string",
-                "enum": ["Glenfiddich", "Macallan", "Lagavulin", "Laphroaig", "Ardbeg"]
-            },
-            "Age": {
-                "type": "string",
-                "enum": ["12", "15", "18", "21", "25"]
-            },
-            "Region": {
-                "type": "string",
-                "enum": ["Speyside", "Islay", "Highland", "Lowland", "Campbeltown"]
-            }
-        }
-    }
-
-    system_prompt = "You are a data scientist and whisky connoisseur ready to answer some questions about the range of whisky available at Tesco."
-
-    from .llm import OpenAICompatLLM
-
-    if args.mcmc:
-        prior = MCMCLLMPrior(llm=OpenAICompatLLM(
-                base_url=args.base_url,
-                model_name=args.model_name, 
-                system_prompt=system_prompt
-            )
-        )
-    else:
-        prior = LLMPrior(llm=OpenAICompatLLM(
-            base_url=args.base_url,
-            model_name=args.model_name,
-            system_prompt=system_prompt
-        ))
-
-        if args.gibbs:
-            prior = GibbsSamplingPrior(base_prior=prior)
-
-    samples = prior.sample(10, schema, verbose=True)
-    print(samples)

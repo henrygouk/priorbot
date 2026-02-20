@@ -7,7 +7,7 @@ class LLM:
         self.model_name = model_name
 
     @abstractmethod
-    def generate(self, prompt: str, output_type: None | dict[str, Any] = None) -> Optional[str | dict[str, Any]]:
+    def generate(self, prompt: str, output_type: None | dict[str, Any] = None, verbose: bool = False) -> Optional[str | dict[str, Any]]:
         pass
 
 class OpenAICompatLLM(LLM):
@@ -54,7 +54,7 @@ class OpenAICompatLLM(LLM):
         self.system_prompt = system_prompt
         self.client = OpenAI(base_url=base_url, **kwargs.get("openai_args", {}))
 
-    def generate(self, prompt: str, output_type: None | dict[str, Any] = None) -> Optional[str | dict[str, Any]]:
+    def generate(self, prompt: str, output_type: None | dict[str, Any] = None, verbose: bool = False) -> Optional[str | dict[str, Any]]:
         """
         Generate a response from the LLM given a prompt and an optional output type. The output type is used to specify
         the expected format of the response.
@@ -84,12 +84,18 @@ class OpenAICompatLLM(LLM):
                 response_format=response_format,
             )
 
+            if verbose:
+                print(response)
+
             return json.loads(response.choices[0].message.content)
         else:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=chat,
             )
+
+            if verbose:
+                print(response)
 
             return response.choices[0].message.content
 
@@ -144,7 +150,7 @@ class OutlinesLocalLLM(LLM):
         self.hf_model = hf_model
         self.hf_tokenizer = hf_tokenizer
 
-    def generate(self, prompt: str, output_type: None | dict[str, Any] = None) -> Optional[str | dict[str, Any]]:
+    def generate(self, prompt: str, output_type: None | dict[str, Any] = None, verbose: bool = False) -> Optional[str | dict[str, Any]]:
         """
         Generate a response from the LLM given a prompt and an optional output type. The output type is used to specify
         the expected format of the response.
