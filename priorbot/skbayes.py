@@ -155,7 +155,7 @@ class DPGBClassifier:
         dataset : Dataset
             The dataset to fit the model on, annotated with relevant meta-data.
         prior : Prior
-            The prior distribution, which can be either an EmpiricalPrior or a stick-breaking process.
+            The prior predictive distribution
         fit_params : dict
             Additional parameters to be passed to the base estimator when fitting.
         """

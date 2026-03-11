@@ -78,6 +78,10 @@ class OpenAICompatLLM(LLM):
                 }
             }
 
+            if verbose:
+                print(f"Prompt: {prompt}")
+                print(f"Response format: {response_format}")
+
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=chat,
@@ -89,6 +93,9 @@ class OpenAICompatLLM(LLM):
 
             return json.loads(response.choices[0].message.content)
         else:
+            if verbose:
+                print(f"Prompt: {prompt}")
+
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=chat,
