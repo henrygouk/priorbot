@@ -7,7 +7,7 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--base-url", type=str, default="http://localhost:8000")
     parser.add_argument("--model-name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
-    parser.add_argument("--prior", type=str, choices=["direct", "gibbs", "barker", "gambling"], default="gambling")
+    parser.add_argument("--prior", type=str, choices=["direct", "gibbs", "barker", "gambling", "gambling_gibbs"], default="gambling")
     args = parser.parse_args()
 
     schema = {
@@ -41,6 +41,8 @@ if __name__ == "__main__":
             prior = BarkerLLMPrior(llm=llm, thinning=5)
         case "gambling":
             prior = GamblingLLMPrior(llm=llm, thinning=5)
+        case "gambling_gibbs":
+            prior = GibbsLLMPrior(base_prior=GamblingLLMPrior(llm=llm, burn_in=0, thinning=1), thinning=5)
         case _:
             raise ValueError("Invalid prior type")
 

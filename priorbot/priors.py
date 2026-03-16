@@ -31,6 +31,10 @@ class UniformPrior(Prior):
                 val_type = value["type"]
                 if val_type == "string" and "enum" in value:
                     sample[key] = np.random.choice(value["enum"]).item()
+                elif val_type == "integer":
+                    sample[key] = np.random.randint(value.get("minimum", 0), value.get("maximum", 100))
+                elif val_type == "number":
+                    sample[key] = np.random.uniform(value.get("minimum", 0), value.get("maximum", 100))
                 else:
                     raise ValueError(f"Unsupported type {val_type} for key {key}")
 
@@ -148,7 +152,7 @@ class MCMCLLMPrior(Prior):
     def __init__(self, llm: LLM, burn_in: int = 10, thinning: int = 1, manual_reasoning: bool = False):
         self.llm = llm
         self.discrete_proposal_dist = UniformPrior()
-        self.continuous_proposal_dist = GaussianPrior()
+        self.continuous_proposal_dist = UniformPrior()
         self.burn_in = burn_in
         self.thinning = thinning
         self.manual_reasoning = manual_reasoning
@@ -179,30 +183,54 @@ class MCMCLLMPrior(Prior):
             disc = {}
 
         if any(value["type"] == "number" or value["type"] == "integer" for value in schema["properties"].values()):
-            means_prompt = f"Given the following schema: {json.dumps(schema)} provide a reasonable estimate for the population means for the " \
-                f"continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
+            # means_prompt = f"Given the following schema: {json.dumps(schema)} provide a reasonable estimate for the population means for the " \
+            #     f"continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
+            #
+            # stds_prompt = f"Given the following schema: {json.dumps(schema)} provide a reaonsable estimate for the population standard deviations " \
+            #     f"for the continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
+            #
+            # means = self.llm.generate(means_prompt, output_type=continuous_schema, verbose=verbose)
+            # stds = self.llm.generate(stds_prompt, output_type=continuous_schema, verbose=verbose)
+            # Get reasonable upper and lower bounds for the integer and number fields and use these to instantiate uniform priors
+            bounds_prompt = f"Given the following schema: {json.dumps(continuous_schema)} provide reasonable estimates for the population minimum and maximum values for the continuous features. Respond in JSON in the following format: {{'feature_name': {{'min': min_value, 'max': max_value}}}} where feature_name is the name of the continuous feature, and min_value and max_value are your estimates for the population minimum and maximum values for that feature, assuming no outliers."
 
-            stds_prompt = f"Given the following schema: {json.dumps(schema)} provide a reaonsable estimate for the population standard deviations " \
-                f"for the continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
+            bounds = self.llm.generate(bounds_prompt, output_type={
+                    "type": "object",
+                    "properties": {
+                        key: {
+                            "type": "object",
+                            "properties": {
+                                "min": {"type": continuous_schema["properties"][key]["type"]},
+                                "max": {"type": continuous_schema["properties"][key]["type"]}
+                            },
+                            "required": ["min", "max"]
+                        } for key in continuous_schema["properties"].keys()
+                    }
+                },
+                verbose=verbose
+            )
 
-            means = self.llm.generate(means_prompt, output_type=continuous_schema, verbose=verbose)
-            stds = self.llm.generate(stds_prompt, output_type=continuous_schema, verbose=verbose)
-        else:
-            means = {}
+            # Put these mins and maxes back into the schema
+            for key, value in bounds.items():
+                if key in continuous_schema["properties"]:
+                    continuous_schema["properties"][key]["minimum"] = value["min"]
+                    continuous_schema["properties"][key]["maximum"] = value["max"]
 
-        samples = [{**disc, **means}]
+        cont = self.continuous_proposal_dist.sample_conditional(continuous_schema, observed, verbose)
+
+        samples = [{**disc, **cont}]
         
         for _ in range(self.burn_in + n_samples * self.thinning):
             candidate_discrete = self.discrete_proposal_dist.sample_conditional(discrete_schema, observed, verbose)
             candidate_continuous = self.continuous_proposal_dist.sample_conditional(continuous_schema, observed, verbose)
 
-            for k in candidate_continuous.keys():
-                candidate_continuous[k] = candidate_continuous[k] * stds[k] + samples[-1][k]
-
-                if continuous_schema["properties"][k].get("type") == "integer":
-                    candidate_continuous[k] = np.round(candidate_continuous[k]).item()
-                else:
-                    candidate_continuous[k] = np.round(candidate_continuous[k], 2).item()
+            # for k in candidate_continuous.keys():
+            #     candidate_continuous[k] = candidate_continuous[k] * stds[k] + samples[-1][k]
+            #
+            #     if continuous_schema["properties"][k].get("type") == "integer":
+            #         candidate_continuous[k] = np.round(candidate_continuous[k]).item()
+            #     else:
+            #         candidate_continuous[k] = np.round(candidate_continuous[k], 2).item()
 
             candidate = {**candidate_discrete, **candidate_continuous}
 
