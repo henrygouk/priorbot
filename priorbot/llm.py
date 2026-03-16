@@ -2,13 +2,17 @@ from abc import abstractmethod
 from typing import Any, Optional
 import json
 
+
 class LLM:
     def __init__(self, model_name: str, **kwargs):
         self.model_name = model_name
 
     @abstractmethod
-    def generate(self, prompt: str, output_type: None | dict[str, Any] = None, verbose: bool = False) -> Optional[str | dict[str, Any]]:
+    def generate(
+        self, prompt: str, json_schema: None | dict[str, Any] = None, verbose: bool = False
+    ) -> Optional[str | dict[str, Any]]:
         pass
+
 
 class OpenAICompatLLM(LLM):
     """
@@ -16,6 +20,9 @@ class OpenAICompatLLM(LLM):
     and other compatible servers such as vLLM.
 
     This class depends on the `openai` library.
+
+    Automatically detects whether the served model supports chat templates. If it does, the chat.completions API is
+    used; otherwise, falls back to the raw completions API.
 
     Example usage:
     ```python
@@ -34,7 +41,7 @@ class OpenAICompatLLM(LLM):
         "required": ["name", "age"]
     }
 
-    response = llm.generate("Generate a data point that conforms to the following schema: {schema}", output_type=schema)
+    response = llm.generate("Generate a data point that conforms to the following schema: {schema}", json_schema=schema)
     ```
     """
 
@@ -53,58 +60,100 @@ class OpenAICompatLLM(LLM):
         self.base_url = base_url
         self.system_prompt = system_prompt
         self.client = OpenAI(base_url=base_url, **kwargs.get("openai_args", {}))
+        self.max_tokens = kwargs.get("max_tokens", 2 ** 12)
+        self._use_chat_api: bool | None = None
 
-    def generate(self, prompt: str, output_type: None | dict[str, Any] = None, verbose: bool = False) -> Optional[str | dict[str, Any]]:
+    def _generate_chat(
+        self, prompt: str, json_schema: None | dict[str, Any], verbose: bool
+    ) -> Optional[str | dict[str, Any]]:
+        chat = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        if verbose:
+            print(f"Chat prompt: ```\n{chat}\n```")
+
+        kwargs = {
+            "model": self.model_name,
+            "messages": chat,
+            "max_tokens": self.max_tokens,
+        }
+
+        if json_schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "output_schema",
+                    "schema": json_schema,
+                }
+            }
+            if verbose:
+                print(f"Response format: ```\n{kwargs['response_format']}\n```")
+
+        response = self.client.chat.completions.create(**kwargs)
+        if verbose:
+            print(f"Response: ```\n{response}\n```")
+
+        content = response.choices[0].message.content
+        if json_schema is not None:
+            return json.loads(content)
+        return content
+    
+    def _generate_completion(
+        self, prompt: str, json_schema: None | dict[str, Any], verbose: bool
+    ) -> Optional[str | dict[str, Any]]:
+        prompt = f"{self.system_prompt}\n\n{prompt}"
+        if verbose:
+            print(f"Completion prompt: ```\n{prompt}\n```")
+
+        kwargs = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "max_tokens": self.max_tokens,  # openai completions default is 16
+        }
+
+        if json_schema is not None:
+            # For vllm >= 0.12.0; this might not work for other libraries (e.g., Ollama) or older versions of vllm
+            kwargs["extra_body"] = {"structured_outputs": {"json": json_schema}}
+
+        response = self.client.completions.create(**kwargs)
+        if verbose:
+            print(f"Response: ```\n{response}\n```")
+
+        content = response.choices[0].text
+        if json_schema is not None:
+            return json.loads(content)
+        return content
+
+    def generate(
+        self, prompt: str, json_schema: None | dict[str, Any] = None, verbose: bool = False
+    ) -> Optional[str | dict[str, Any]]:
         """
         Generate a response from the LLM given a prompt and an optional output type. The output type is used to specify
         the expected format of the response.
 
         :param prompt: The prompt to send to the LLM (e.g. "Generate a data point that conforms to the following schema: {schema}")
-        :param output_type: The expected format of the response (e.g. a JSON schema dict). If None, the response is returned as a string.
+        :param json_schema: The expected format of the response (e.g. a JSON schema dict). If None, the response is returned as a string.
 
         :return: The response from the LLM, either as a string or in the specified format (e.g. a dict conforming to the JSON schema).
         """
-        chat = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": prompt},
-        ]
+        from openai import BadRequestError
 
-        if output_type is not None:
-            response_format = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "output_schema",
-                    "schema": output_type,
-                }
-            }
+        if self._use_chat_api is None:
+            try:
+                result = self._generate_chat(prompt, json_schema, verbose)
+                self._use_chat_api = True
+                return result
+            except BadRequestError as e:
+                if "chat template" in str(e).lower():
+                    print("\nModel has no chat template — falling back to completions API.")
+                    self._use_chat_api = False
+                    return self._generate_completion(prompt, json_schema, verbose)
+                raise
 
-            if verbose:
-                print(f"Prompt: {prompt}")
-                print(f"Response format: {response_format}")
-
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=chat,
-                response_format=response_format,
-            )
-
-            if verbose:
-                print(response)
-
-            return json.loads(response.choices[0].message.content)
-        else:
-            if verbose:
-                print(f"Prompt: {prompt}")
-
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=chat,
-            )
-
-            if verbose:
-                print(response)
-
-            return response.choices[0].message.content
+        if self._use_chat_api:
+            return self._generate_chat(prompt, json_schema, verbose)
+        return self._generate_completion(prompt, json_schema, verbose)
 
 class OutlinesLocalLLM(LLM):
     """
@@ -129,7 +178,7 @@ class OutlinesLocalLLM(LLM):
         "required": ["name", "age"]
     }
 
-    response = llm.generate("Generate a data point that conforms to the following schema: {schema}", output_type=schema)
+    response = llm.generate("Generate a data point that conforms to the following schema: {schema}", json_schema=schema)
     """
     
     def __init__(self, model_name: str, system_prompt: str, **kwargs):
@@ -157,13 +206,13 @@ class OutlinesLocalLLM(LLM):
         self.hf_model = hf_model
         self.hf_tokenizer = hf_tokenizer
 
-    def generate(self, prompt: str, output_type: None | dict[str, Any] = None, verbose: bool = False) -> Optional[str | dict[str, Any]]:
+    def generate(self, prompt: str, json_schema: None | dict[str, Any] = None, verbose: bool = False) -> Optional[str | dict[str, Any]]:
         """
         Generate a response from the LLM given a prompt and an optional output type. The output type is used to specify
         the expected format of the response.
 
         :param prompt: The prompt to send to the LLM (e.g. "Generate a data point that conforms to the following schema: {schema}")
-        :param output_type: The expected format of the response (e.g. a JSON schema dict). If None, the response is returned as a string.
+        :param json_schema: The expected format of the response (e.g. a JSON schema dict). If None, the response is returned as a string.
 
         :return: The response from the LLM, either as a string or in the specified format (e.g. a dict conforming to the JSON schema).
         """
@@ -175,14 +224,14 @@ class OutlinesLocalLLM(LLM):
         ]
 
         input_ids = self.hf_tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
-        output = self.model(input_ids, JsonSchema(output_type) if output_type else str)
+        output = self.model(input_ids, JsonSchema(json_schema) if json_schema else str)
         return output
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
 
     parser = ArgumentParser()
-    parser.add_argument("--model-name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
+    parser.add_argument("--model-name", type=str, required=True)
     parser.add_argument("--base-url", type=str, default=None)
     args = parser.parse_args()
 
@@ -202,10 +251,14 @@ if __name__ == "__main__":
         "type": "object",
         "properties": {
             "name": {"type": "string"},
-            "age": {"type": "integer"}
+            "age": {"type": "integer"},
         },
-        "required": ["name", "age"]
+        "required": ["name", "age"],
     }
 
-    response = llm.generate(f"Generate a data point that conforms to the following schema: {schema}", output_type=schema)
+    response = llm.generate(
+        f"Generate a data point that conforms to the following schema: {schema}",
+        json_schema=schema,
+        verbose=True,
+    )
     print(response)

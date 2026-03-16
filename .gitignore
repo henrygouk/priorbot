@@ -1,2 +1,4 @@
 __pycache__/
 priorbot.egg-info/
+.vscode/
+.venv/
