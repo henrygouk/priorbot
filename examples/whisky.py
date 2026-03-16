@@ -5,8 +5,8 @@ if __name__ == "__main__":
     from argparse import ArgumentParser
 
     parser = ArgumentParser()
-    parser.add_argument("--base-url", type=str, default="http://localhost:8000")
-    parser.add_argument("--model-name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
+    parser.add_argument("--model-name", type=str, required=True)
+    parser.add_argument("--base-url", type=str, default=None)
     parser.add_argument("--prior", type=str, choices=["direct", "gibbs", "barker", "gambling", "gambling_gibbs"], default="gambling")
     args = parser.parse_args()
 
@@ -17,9 +17,15 @@ if __name__ == "__main__":
                 "type": "string",
                 "enum": ["Glenfiddich", "Macallan", "Lagavulin", "Laphroaig", "Ardbeg"]
             },
-            "Age": {
-                "type": "string",
-                "enum": ["10", "12", "16", "18", "25"]
+            "Age (years)": {
+                "type": "integer",
+                "maximum": 100,
+                "minimum": 1,
+            },
+            "ABV (%)": {
+                "type": "number",
+                "maximum": 100,
+                "minimum": 0,
             },
             "Region": {
                 "type": "string",
