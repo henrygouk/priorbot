@@ -118,10 +118,11 @@ class GibbsLLMPrior(Prior):
 
         for _ in range(self.burn_in + n_samples * self.thinning):
             itr_observed = samples[-1].copy()
-            print(itr_observed)
-            key_to_discard = np.random.choice(list(itr_observed.keys()))
-            itr_observed.pop(key_to_discard)
-            
+            keys = list(itr_observed.keys())
+            np.random.shuffle(keys)
+            itr_observed = {k: itr_observed[k] for k in keys[:-1]}
+            key_to_discard = keys[-1]
+
             itr_schema = {
                 "type": "object",
                 "properties": {
