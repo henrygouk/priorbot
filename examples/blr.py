@@ -39,7 +39,7 @@ if __name__ == "__main__":
         "required": dataset.feature_schema["required"] + dataset.target_schema["required"]
     }
 
-    prior_samples = base_prior.sample(args.n_samples, full_schema, verbose=True)
+    prior_samples = base_prior.sample(args.n_samples, schema=full_schema, verbose=True)
     prior = EmpiricalPrior(prior_samples)
 
     base_model = LogisticRegression(solver="liblinear")

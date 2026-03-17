@@ -91,7 +91,7 @@ class LLMPrior(Prior):
         return sample
     
     def _sample_impl(self, input_str: str, schema: dict[str, Any], verbose: bool) -> dict[str, Any]:
-        output = self.llm.generate(input_str, output_type=schema, verbose=verbose)
+        output = self.llm.generate(input_str, schema=schema, verbose=verbose)
 
         if type(output) is not dict:
             if verbose:
@@ -189,12 +189,12 @@ class MCMCLLMPrior(Prior):
             # stds_prompt = f"Given the following schema: {json.dumps(schema)} provide a reaonsable estimate for the population standard deviations " \
             #     f"for the continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
             #
-            # means = self.llm.generate(means_prompt, output_type=continuous_schema, verbose=verbose)
-            # stds = self.llm.generate(stds_prompt, output_type=continuous_schema, verbose=verbose)
+            # means = self.llm.generate(means_prompt, schema=continuous_schema, verbose=verbose)
+            # stds = self.llm.generate(stds_prompt, schema=continuous_schema, verbose=verbose)
             # Get reasonable upper and lower bounds for the integer and number fields and use these to instantiate uniform priors
             bounds_prompt = f"Given the following schema: {json.dumps(continuous_schema)} provide reasonable estimates for the population minimum and maximum values for the continuous features. Respond in JSON in the following format: {{'feature_name': {{'min': min_value, 'max': max_value}}}} where feature_name is the name of the continuous feature, and min_value and max_value are your estimates for the population minimum and maximum values for that feature, assuming no outliers."
 
-            bounds = self.llm.generate(bounds_prompt, output_type={
+            bounds = self.llm.generate(bounds_prompt, schema={
                     "type": "object",
                     "properties": {
                         key: {
