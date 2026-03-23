@@ -142,6 +142,56 @@ class GibbsLLMPrior(Prior):
         thinned_samples = samples[self.burn_in::self.thinning][:n_samples]
         return thinned_samples
 
+class Proposal:
+    @abstractmethod
+    def sample_conditional(self, observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
+        pass
+
+class UniformProposal(Proposal):
+    def __init__(self, discrete_schema: dict[str, Any], numeric_schema: dict[str, Any]):
+        self.discrete_schema = discrete_schema
+        self.continuous_schema = numeric_schema
+
+    def sample_conditional(self, observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
+        result = {**observed}
+
+        for key, value in self.discrete_schema["properties"].items():
+            if key not in observed:
+                result[key] = np.random.choice(value["enum"]).item()
+
+        for key, value in self.continuous_schema["properties"].items():
+            if key not in observed:
+                if self.continuous_schema["properties"][key].get("type") == "integer":
+                    result[key] = np.random.randint(value.get("minimum", 0), value.get("maximum", 100))
+                elif self.continuous_schema["properties"][key].get("type") == "number":
+                    result[key] = np.random.uniform(value.get("minimum", 0), value.get("maximum", 100))
+                else:
+                    raise ValueError(f"Unsupported type {value['type']} for key {key}")
+
+        return result
+
+def uniform_ctr(llm: LLM, discrete_schema: dict[str, Any], numeric_schema: dict[str, Any]) -> Proposal:
+    numeric_schema = numeric_schema.copy()
+
+    for key, value in numeric_schema["properties"].items():
+        if "minimum" not in value or "maximum" not in value:
+            bounds_prompt = f"Given the following schema: {json.dumps(numeric_schema)} provide reasonable estimates for the population minimum and maximum values for the continuous feature {key}. Respond in JSON in the following format: {{'min': min_value, 'max': max_value}} where min_value and max_value are your estimates for the population minimum and maximum values for that feature, assuming no outliers."
+
+            bounds = llm.generate(bounds_prompt, schema={
+                    "type": "object",
+                    "properties": {
+                        "min": {"type": value["type"]},
+                        "max": {"type": value["type"]}
+                    },
+                    "required": ["min", "max"]
+                }
+            )
+
+            numeric_schema["properties"][key]["minimum"] = value.get("min", bounds["min"])
+            numeric_schema["properties"][key]["maximum"] = value.get("max", bounds["max"])
+
+    return UniformProposal(discrete_schema, numeric_schema)
+
 class MCMCLLMPrior(Prior):
     """
     Use the Markov Chain Monta Carlo with People approach to sampling from the LLM. This uses the LLM to decide whether
@@ -149,10 +199,9 @@ class MCMCLLMPrior(Prior):
     approximately uniform.
     """
 
-    def __init__(self, llm: LLM, burn_in: int = 10, thinning: int = 1, manual_reasoning: bool = False):
+    def __init__(self, llm: LLM, burn_in: int = 10, thinning: int = 1, manual_reasoning: bool = False, proposal_ctr: Callable[[LLM, dict[str, Any], dict[str, Any]], Proposal] = uniform_ctr):
         self.llm = llm
-        self.discrete_proposal_dist = UniformPrior()
-        self.continuous_proposal_dist = UniformPrior()
+        self.proposal_ctr = proposal_ctr
         self.burn_in = burn_in
         self.thinning = thinning
         self.manual_reasoning = manual_reasoning
@@ -177,62 +226,11 @@ class MCMCLLMPrior(Prior):
             "required": [key for key, value in schema["properties"].items() if value["type"] == "number" or value["type"] == "integer"]
         }
 
-        if any(value["type"] == "string" for value in schema["properties"].values()):
-            disc = self.discrete_proposal_dist.sample_conditional(discrete_schema, observed, verbose)
-        else:
-            disc = {}
-
-        if any(value["type"] == "number" or value["type"] == "integer" for value in schema["properties"].values()):
-            # means_prompt = f"Given the following schema: {json.dumps(schema)} provide a reasonable estimate for the population means for the " \
-            #     f"continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
-            #
-            # stds_prompt = f"Given the following schema: {json.dumps(schema)} provide a reaonsable estimate for the population standard deviations " \
-            #     f"for the continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
-            #
-            # means = self.llm.generate(means_prompt, schema=continuous_schema, verbose=verbose)
-            # stds = self.llm.generate(stds_prompt, schema=continuous_schema, verbose=verbose)
-            # Get reasonable upper and lower bounds for the integer and number fields and use these to instantiate uniform priors
-            bounds_prompt = f"Given the following schema: {json.dumps(continuous_schema)} provide reasonable estimates for the population minimum and maximum values for the continuous features. Respond in JSON in the following format: {{'feature_name': {{'min': min_value, 'max': max_value}}}} where feature_name is the name of the continuous feature, and min_value and max_value are your estimates for the population minimum and maximum values for that feature, assuming no outliers."
-
-            bounds = self.llm.generate(bounds_prompt, schema={
-                    "type": "object",
-                    "properties": {
-                        key: {
-                            "type": "object",
-                            "properties": {
-                                "min": {"type": continuous_schema["properties"][key]["type"]},
-                                "max": {"type": continuous_schema["properties"][key]["type"]}
-                            },
-                            "required": ["min", "max"]
-                        } for key in continuous_schema["properties"].keys()
-                    }
-                },
-                verbose=verbose
-            )
-
-            # Put these mins and maxes back into the schema
-            for key, value in bounds.items():
-                if key in continuous_schema["properties"]:
-                    continuous_schema["properties"][key]["minimum"] = value["min"]
-                    continuous_schema["properties"][key]["maximum"] = value["max"]
-
-        cont = self.continuous_proposal_dist.sample_conditional(continuous_schema, observed, verbose)
-
-        samples = [{**disc, **cont}]
+        proposal_dst = self.proposal_ctr(self.llm, discrete_schema, continuous_schema)
+        samples = [proposal_dst.sample_conditional(observed, verbose)]
         
         for _ in range(self.burn_in + n_samples * self.thinning):
-            candidate_discrete = self.discrete_proposal_dist.sample_conditional(discrete_schema, observed, verbose)
-            candidate_continuous = self.continuous_proposal_dist.sample_conditional(continuous_schema, observed, verbose)
-
-            # for k in candidate_continuous.keys():
-            #     candidate_continuous[k] = candidate_continuous[k] * stds[k] + samples[-1][k]
-            #
-            #     if continuous_schema["properties"][k].get("type") == "integer":
-            #         candidate_continuous[k] = np.round(candidate_continuous[k]).item()
-            #     else:
-            #         candidate_continuous[k] = np.round(candidate_continuous[k], 2).item()
-
-            candidate = {**candidate_discrete, **candidate_continuous}
+            candidate = proposal_dst.sample_conditional(samples[-1], verbose)
 
             if np.random.choice([True, False]):
                 options = [samples[-1], candidate]
@@ -251,8 +249,6 @@ class MCMCLLMPrior(Prior):
                 if verbose:
                     print(f"Error during acceptance step: {e}. Rejecting candidate.")
                 raise e
-
-                samples.append(samples[-1])
 
             if verbose:
                 print(f"Generated {len(samples[self.burn_in::self.thinning][:n_samples])}/{n_samples} samples.")
@@ -278,8 +274,9 @@ class BarkerLLMPrior(MCMCLLMPrior):
             burn_in: int = 10,
             thinning: int = 1,
             manual_reasoning: bool = False,
-            prompt_template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = barker_prompt_template):
-        super().__init__(llm, burn_in, thinning, manual_reasoning)
+            prompt_template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = barker_prompt_template
+            proposal_ctr: Callable[[LLM, dict[str, Any], dict[str, Any]], Proposal] = uniform_ctr):
+        super().__init__(llm, burn_in, thinning, manual_reasoning, proposal_ctr)
         self.prompt_template = prompt_template
 
     def _acceptance(self, option1: dict[str, Any], option2: dict[str, Any], schema: dict[str, Any], observed: dict[str, Any] | None = None, verbose: bool = False) -> bool:
@@ -326,8 +323,9 @@ class GamblingLLMPrior(MCMCLLMPrior):
             burn_in: int = 10,
             thinning: int = 1,
             manual_reasoning: bool = False,
-            prompt_template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = gambling_prompt_template):
-        super().__init__(llm, burn_in, thinning, manual_reasoning)
+            prompt_template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = gambling_prompt_template
+            proposal_ctr: Callable[[LLM, dict[str, Any], dict[str, Any]], Proposal] = uniform_ctr):
+        super().__init__(llm, burn_in, thinning, manual_reasoning, proposal_ctr)
         self.prompt_template = prompt_template
 
     def _acceptance(self, option1: dict[str, Any], option2: dict[str, Any], schema: dict[str, Any], observed: dict[str, Any] | None = None, verbose: bool = False) -> bool:
