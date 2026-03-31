@@ -69,6 +69,8 @@ class OpenAICompatLLM(LLM):
         :param base_url: The base URL of the OpenAI-compatible API (e.g. "http://localhost:8000/v1")
         :param system_prompt: The system prompt to use for the LLM (e.g. "You are a helpful assistant that generates data points conforming to a given schema.")
         :param max_tokens: Maximum number of tokens to generate (default: 1024).
+        :param temperature: The temperature to use for the LLM (default: 1.0).
+        :param top_p: The top-p value to use for the LLM (default: 1.0).
         """
         from openai import OpenAI
 
@@ -77,6 +79,8 @@ class OpenAICompatLLM(LLM):
         self.system_prompt = system_prompt
         self.client = OpenAI(base_url=base_url, **kwargs.get("openai_args", {}))
         self.max_tokens = kwargs.get("max_tokens", 1024)
+        self.temperature = kwargs.get("temperature", 1.0)
+        self.top_p = kwargs.get("top_p", 1.0)
         self._use_chat_api: bool | None = None
 
     def _generate_chat(
@@ -93,6 +97,8 @@ class OpenAICompatLLM(LLM):
             "model": self.model_name,
             "messages": chat,
             "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
         }
 
         if schema is not None:
@@ -118,7 +124,7 @@ class OpenAICompatLLM(LLM):
     def _generate_completion(
         self, prompt: str, schema: None | dict[str, Any], verbose: bool
     ) -> str | dict[str, Any]:
-        prompt = f"{self.system_prompt}\n\n{prompt}"
+        prompt = f"{self.system_prompt}\n{prompt}"
         if verbose:
             print(f"Completion prompt: ```\n{prompt}\n```")
 
@@ -126,6 +132,8 @@ class OpenAICompatLLM(LLM):
             "model": self.model_name,
             "prompt": prompt,
             "max_tokens": self.max_tokens,  # openai completions default is 16
+            "temperature": self.temperature,
+            "top_p": self.top_p,
         }
 
         if schema is not None:
@@ -169,24 +177,24 @@ class OpenAICompatLLM(LLM):
                     return self._generate_completion(prompt, schema, verbose)
                 raise
 
-        try:
-            if self._use_chat_api:
-                content = self._generate_chat(prompt, schema, verbose)
-            else:
-                content = self._generate_completion(prompt, schema, verbose)
+        for _ in range(max_trials):
+            try:
+                if self._use_chat_api:
+                    content = self._generate_chat(prompt, schema, verbose)
+                else:
+                    content = self._generate_completion(prompt, schema, verbose)
 
-            if schema is not None:
-                assert isinstance(content, dict)  # JSON-formatted response
-                _check_schema_bounds(content, schema)
+                if schema is not None:
+                    assert isinstance(content, dict)  # JSON-formatted response
+                    _check_schema_bounds(content, schema)
+
+            except Exception as e:
+                print(f"Error during generation: {e}. Retrying...")
+                continue
+
             return content
 
-        except Exception as e:
-            print(f"Error during generation: {e}. Retrying...")
-            if max_trials > 0:
-                return self.generate(prompt, schema, verbose, max_trials - 1)
-            else:
-                print(f"Failed to generate a valid response after {max_trials} trials. Raising exception.")
-                raise e
+        raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
 
 
 class OutlinesLocalLLM(LLM):
