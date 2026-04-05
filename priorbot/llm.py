@@ -124,7 +124,7 @@ class OpenAICompatLLM(LLM):
     def _generate_completion(
         self, prompt: str, schema: None | dict[str, Any], verbose: bool
     ) -> str | dict[str, Any]:
-        prompt = f"{self.system_prompt}\n{prompt}"
+        prompt = f"{(self.system_prompt + '\n') if self.system_prompt else ''}{prompt}"
         if verbose:
             print(f"Completion prompt: ```\n{prompt}\n```")
 
