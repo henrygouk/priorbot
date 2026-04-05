@@ -68,16 +68,35 @@ class GaussianPrior(Prior):
         return self.sample(1, schema, verbose)[0]
 
 class LLMPrior(Prior):
-    def __init__(self, llm: LLM, manual_reasoning: bool = False):
+    def __init__(
+        self,
+        llm: LLM,
+        template: Callable[[dict[str, Any]], str] | None = None,
+        template_conditional: Callable[[dict[str, Any], dict[str, Any]], str] | None = None,
+        manual_reasoning: bool = False,
+    ):
         self.llm = llm
+
+        def _default_llm_template(schema: dict[str, Any]) -> str:
+            return f"Generate a data point that conforms to the following schema: {json.dumps(schema)}"
+
+        def _default_llm_template_conditional(observed: dict[str, Any], schema: dict[str, Any]) -> str:
+            return (
+                f"Given the observed features with these values: {json.dumps(observed)}, "
+                f"generate a data point that conforms to the following schema: {json.dumps(schema)}"
+            )
+
+        self.template = template or _default_llm_template
+        self.template_conditional = template_conditional or _default_llm_template_conditional
 
     def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
         samples = []
-        input_str = f"Generate a data point that conforms to the following schema: {json.dumps(schema)}"
+
         pbar_samples = tqdm(total=n_samples, disable=not pbar, dynamic_ncols=True)
         while len(samples) < n_samples:
+            input_str = self.template(schema)
             sample = self._sample_impl(input_str, schema, verbose)
-            
+
             if sample:
                 samples.append(sample)
                 pbar_samples.update(1)
@@ -88,7 +107,7 @@ class LLMPrior(Prior):
         return samples
 
     def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        input_str = f"Given the observed features with these values: {json.dumps(observed)}, generate a data point that conforms to the following schema: {json.dumps(schema)}"
+        input_str = self.template_conditional(observed, schema)
         sample = self._sample_impl(input_str, schema, verbose)
         return sample
 
