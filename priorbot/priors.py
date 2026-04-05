@@ -171,13 +171,14 @@ class MCMCLLMPrior(Prior):
     approximately uniform.
     """
 
-    def __init__(self, llm: LLM, burn_in: int = 10, thinning: int = 1, manual_reasoning: bool = False):
+    def __init__(self, llm: LLM, burn_in: int = 10, thinning: int = 1, manual_reasoning: bool = False, max_trials: int = 10):
         self.llm = llm
         self.discrete_proposal_dist = UniformPrior()
         self.continuous_proposal_dist = UniformPrior()
         self.burn_in = burn_in
         self.thinning = thinning
         self.manual_reasoning = manual_reasoning
+        self.max_trials = max_trials
 
     def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
         return self._sample_impl(n_samples, schema, {}, verbose, pbar)
@@ -199,12 +200,14 @@ class MCMCLLMPrior(Prior):
             "required": [key for key, value in schema["properties"].items() if value["type"] == "number" or value["type"] == "integer"]
         }
 
-        if any(value["type"] == "string" for value in schema["properties"].values()):
-            disc = self.discrete_proposal_dist.sample_conditional(discrete_schema, observed, verbose)
-        else:
-            disc = {}
+        has_discrete_features = any(value["type"] == "string" for value in schema["properties"].values())
+        has_continuous_features = any(value["type"] == "number" or value["type"] == "integer" for value in schema["properties"].values())
 
-        if any(value["type"] == "number" or value["type"] == "integer" for value in schema["properties"].values()):
+        disc = {}
+        if has_discrete_features:
+            disc = self.discrete_proposal_dist.sample_conditional(discrete_schema, observed, verbose)
+
+        if has_continuous_features and any(("minimum" not in value or "maximum" not in value) for value in schema["properties"].values()):
             # means_prompt = f"Given the following schema: {json.dumps(schema)} provide a reasonable estimate for the population means for the " \
             #     f"continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
             #
@@ -239,23 +242,41 @@ class MCMCLLMPrior(Prior):
                     continuous_schema["properties"][key]["minimum"] = value["min"]
                     continuous_schema["properties"][key]["maximum"] = value["max"]
 
-        cont = self.continuous_proposal_dist.sample_conditional(continuous_schema, observed, verbose)
+        cont = {}
+        if has_continuous_features:
+            cont = self.continuous_proposal_dist.sample_conditional(continuous_schema, observed, verbose)
 
         samples = [{**disc, **cont}]
 
         for _ in tqdm(range(self.burn_in + n_samples * self.thinning), disable=not pbar, dynamic_ncols=True):
-            candidate_discrete = self.discrete_proposal_dist.sample_conditional(discrete_schema, observed, verbose)
-            candidate_continuous = self.continuous_proposal_dist.sample_conditional(continuous_schema, observed, verbose)
+            candidate = {}  # Prevent PossiblyUnboundVariable error from type checkers
+            for _ in range(self.max_trials):  # Try up to max_trials times to generate a valid candidate
+                candidate_discrete = {}
+                if has_discrete_features:
+                    candidate_discrete = self.discrete_proposal_dist.sample_conditional(
+                        discrete_schema, observed, verbose
+                    )
 
-            # for k in candidate_continuous.keys():
-            #     candidate_continuous[k] = candidate_continuous[k] * stds[k] + samples[-1][k]
-            #
-            #     if continuous_schema["properties"][k].get("type") == "integer":
-            #         candidate_continuous[k] = np.round(candidate_continuous[k]).item()
-            #     else:
-            #         candidate_continuous[k] = np.round(candidate_continuous[k], 2).item()
+                candidate_continuous = {}
+                if has_continuous_features:
+                    candidate_continuous = self.continuous_proposal_dist.sample_conditional(
+                        continuous_schema, observed, verbose
+                    )
 
-            candidate = {**candidate_discrete, **candidate_continuous}
+                # for k in candidate_continuous.keys():
+                #     candidate_continuous[k] = candidate_continuous[k] * stds[k] + samples[-1][k]
+                #
+                #     if continuous_schema["properties"][k].get("type") == "integer":
+                #         candidate_continuous[k] = np.round(candidate_continuous[k]).item()
+                #     else:
+                #         candidate_continuous[k] = np.round(candidate_continuous[k], 2).item()
+
+                candidate = {**candidate_discrete, **candidate_continuous}
+
+                # If the candidate is the same as the previous sample, try again
+                if all(samples[-1][k] == candidate[k] for k in candidate.keys()):
+                    continue
+                break
 
             if np.random.choice([True, False]):
                 options = [samples[-1], candidate]
