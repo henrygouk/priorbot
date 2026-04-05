@@ -225,6 +225,8 @@ class MCMCLLMPrior(Prior):
         samples = [{**disc, **cont}]
 
         for _ in tqdm(range(self.burn_in + n_samples * self.thinning), disable=not pbar, dynamic_ncols=True):
+            candidate_discrete = self.discrete_proposal_dist.sample_conditional(discrete_schema, observed, verbose)
+            candidate_continuous = self.continuous_proposal_dist.sample_conditional(continuous_schema, observed, verbose)
 
             # for k in candidate_continuous.keys():
             #     candidate_continuous[k] = candidate_continuous[k] * stds[k] + samples[-1][k]
