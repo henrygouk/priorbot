@@ -1,7 +1,22 @@
 from abc import abstractmethod
-from typing import Any, Optional
+from typing import Any
 import json
 
+
+def _check_schema_bounds(data: dict[str, Any], schema: dict[str, Any]) -> None:
+    """Return True if all numeric values satisfy the schema's minimum/maximum constraints."""
+    props = schema.get("properties", {})
+    for key, value in data.items():
+        if key in props and props[key]["type"] in ["number", "integer"]:
+            lo = props[key].get("minimum")
+            hi = props[key].get("maximum")
+            if (lo is not None and value < lo) or (hi is not None and value > hi):
+                raise ValueError(f"Value {value} for key {key} is out of bounds for schema {schema}")
+
+        if key in props and props[key]["type"] == "string":
+            enum = props[key].get("enum")
+            if enum is not None and value not in enum:
+                raise ValueError(f"Value {value} for key {key} is not in enum {enum} for schema {schema}")
 
 class LLM:
     def __init__(self, model_name: str, **kwargs):
@@ -10,7 +25,7 @@ class LLM:
     @abstractmethod
     def generate(
         self, prompt: str, schema: None | dict[str, Any] = None, verbose: bool = False
-    ) -> Optional[str | dict[str, Any]]:
+    ) -> str | dict[str, Any]:
         pass
 
 
@@ -53,6 +68,9 @@ class OpenAICompatLLM(LLM):
         :param model_name: The name of the model to use (e.g. "meta-llama/Meta-Llama-3-8B-Instruct")
         :param base_url: The base URL of the OpenAI-compatible API (e.g. "http://localhost:8000/v1")
         :param system_prompt: The system prompt to use for the LLM (e.g. "You are a helpful assistant that generates data points conforming to a given schema.")
+        :param max_tokens: Maximum number of tokens to generate (default: 1024).
+        :param temperature: The temperature to use for the LLM (default: 1.0).
+        :param top_p: The top-p value to use for the LLM (default: 1.0).
         """
         from openai import OpenAI
 
@@ -60,12 +78,14 @@ class OpenAICompatLLM(LLM):
         self.base_url = base_url
         self.system_prompt = system_prompt
         self.client = OpenAI(base_url=base_url, **kwargs.get("openai_args", {}))
-        self.max_tokens = kwargs.get("max_tokens", 2 ** 12)
+        self.max_tokens = kwargs.get("max_tokens", 1024)
+        self.temperature = kwargs.get("temperature", 1.0)
+        self.top_p = kwargs.get("top_p", 1.0)
         self._use_chat_api: bool | None = None
 
     def _generate_chat(
         self, prompt: str, schema: None | dict[str, Any], verbose: bool
-    ) -> Optional[str | dict[str, Any]]:
+    ) -> str | dict[str, Any]:
         chat = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": prompt},
@@ -77,6 +97,8 @@ class OpenAICompatLLM(LLM):
             "model": self.model_name,
             "messages": chat,
             "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
         }
 
         if schema is not None:
@@ -101,8 +123,8 @@ class OpenAICompatLLM(LLM):
     
     def _generate_completion(
         self, prompt: str, schema: None | dict[str, Any], verbose: bool
-    ) -> Optional[str | dict[str, Any]]:
-        prompt = f"{self.system_prompt}\n\n{prompt}"
+    ) -> str | dict[str, Any]:
+        prompt = f"{(self.system_prompt + '\n') if self.system_prompt else ''}{prompt}"
         if verbose:
             print(f"Completion prompt: ```\n{prompt}\n```")
 
@@ -110,6 +132,8 @@ class OpenAICompatLLM(LLM):
             "model": self.model_name,
             "prompt": prompt,
             "max_tokens": self.max_tokens,  # openai completions default is 16
+            "temperature": self.temperature,
+            "top_p": self.top_p,
         }
 
         if schema is not None:
@@ -126,14 +150,16 @@ class OpenAICompatLLM(LLM):
         return content
 
     def generate(
-        self, prompt: str, schema: None | dict[str, Any] = None, verbose: bool = False
-    ) -> Optional[str | dict[str, Any]]:
+        self, prompt: str, schema: None | dict[str, Any] = None, verbose: bool = False, max_trials: int = 10
+    ) -> str | dict[str, Any]:
         """
         Generate a response from the LLM given a prompt and an optional output type. The output type is used to specify
         the expected format of the response.
 
         :param prompt: The prompt to send to the LLM (e.g. "Generate a data point that conforms to the following schema: {schema}")
         :param schema: The expected format of the response (e.g. a JSON schema dict). If None, the response is returned as a string.
+        :param verbose: Whether to print the prompt and response to the console.
+        :param max_trials: The maximum number of trials to make if the response is not valid.
 
         :return: The response from the LLM, either as a string or in the specified format (e.g. a dict conforming to the JSON schema).
         """
@@ -151,9 +177,25 @@ class OpenAICompatLLM(LLM):
                     return self._generate_completion(prompt, schema, verbose)
                 raise
 
-        if self._use_chat_api:
-            return self._generate_chat(prompt, schema, verbose)
-        return self._generate_completion(prompt, schema, verbose)
+        for _ in range(max_trials):
+            try:
+                if self._use_chat_api:
+                    content = self._generate_chat(prompt, schema, verbose)
+                else:
+                    content = self._generate_completion(prompt, schema, verbose)
+
+                if schema is not None:
+                    assert isinstance(content, dict)  # JSON-formatted response
+                    _check_schema_bounds(content, schema)
+
+            except Exception as e:
+                print(f"Error during generation: {e}. Retrying...")
+                continue
+
+            return content
+
+        raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
+
 
 class OutlinesLocalLLM(LLM):
     """
@@ -206,13 +248,17 @@ class OutlinesLocalLLM(LLM):
         self.hf_model = hf_model
         self.hf_tokenizer = hf_tokenizer
 
-    def generate(self, prompt: str, schema: None | dict[str, Any] = None, verbose: bool = False) -> Optional[str | dict[str, Any]]:
+    def generate(
+        self, prompt: str, schema: None | dict[str, Any] = None, verbose: bool = False, max_trials: int = 10
+    ) -> str | dict[str, Any]:
         """
         Generate a response from the LLM given a prompt and an optional output type. The output type is used to specify
         the expected format of the response.
 
         :param prompt: The prompt to send to the LLM (e.g. "Generate a data point that conforms to the following schema: {schema}")
         :param schema: The expected format of the response (e.g. a JSON schema dict). If None, the response is returned as a string.
+        :param verbose: Whether to print the prompt and response to the console.
+        :param max_trials: The maximum number of trials to make if the response is not valid.
 
         :return: The response from the LLM, either as a string or in the specified format (e.g. a dict conforming to the JSON schema).
         """
@@ -225,6 +271,15 @@ class OutlinesLocalLLM(LLM):
 
         input_ids = self.hf_tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
         output = self.model(input_ids, JsonSchema(schema) if schema else str)
+        if schema is not None:
+            assert isinstance(output, dict)  # JSON-formatted response
+            if not _check_schema_bounds(output, schema):
+                if max_trials > 0:
+                    return self.generate(prompt, schema, verbose, max_trials - 1)
+                else:
+                    raise RuntimeError(
+                        f"Failed to generate a valid response after {max_trials} trials."
+                    )
         return output
 
 if __name__ == "__main__":
