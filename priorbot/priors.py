@@ -264,7 +264,7 @@ class AsyncPrior(Prior, ABC):
                 schema[i],
                 observed[i] if observed is not None else None,
                 verbose,
-                pbar,
+                i if pbar else None,
             )
             for i in range(len(schema))
         ]
@@ -278,7 +278,7 @@ class AsyncPrior(Prior, ABC):
         schema: dict[str, Any],
         observed: dict[str, Any] | None = None,
         verbose: bool = False,
-        pbar: bool = False,
+        pbar: int | None = None,
     ) -> list[dict[str, Any]]:
         pass
 
@@ -311,10 +311,12 @@ class LLMPrior(AsyncPrior):
         schema: dict[str, Any],
         observed: dict[str, Any] | None = None,
         verbose: bool = False,
-        pbar: bool = False,
+        pbar: int | None = None,
     ) -> list[dict[str, Any]]:
         samples = []
-        for _ in range(n_samples):
+        for _ in tqdm(
+            range(n_samples), disable=pbar is None, position=pbar, desc=f"Worker {pbar}", dynamic_ncols=True
+        ):
             if observed is None:
                 prompt = self.template(schema)
             else:
@@ -342,11 +344,14 @@ class GibbsLLMPrior(AsyncPrior):
         schema: dict[str, Any],
         observed: dict[str, Any] | None = None,
         verbose: bool = False,
-        pbar: bool = False,
+        pbar: int | None = None,
     ) -> list[dict[str, Any]]:
         samples = self.base_prior.sample(1, schema, verbose, False)
 
-        for _ in tqdm(range(self.burn_in + n_samples * self.thinning), disable=not pbar, dynamic_ncols=True):
+        chain_length = self.burn_in + n_samples * self.thinning
+        for _ in tqdm(
+            range(chain_length), disable=pbar is None, position=pbar, desc=f"Chain {pbar}", dynamic_ncols=True
+        ):
             itr_observed = samples[-1].copy()
             keys = list(itr_observed.keys())
             np.random.shuffle(keys)
@@ -403,7 +408,7 @@ class MCMCLLMPrior(AsyncPrior):
         schema: dict[str, Any],
         observed: dict[str, Any] | None = None,
         verbose: bool = False,
-        pbar: bool = False,
+        pbar: int | None = None,
     ) -> list[dict[str, Any]]:
 
         def _sample_single(proposal: Prior, s: dict[str, Any], o: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -472,7 +477,10 @@ class MCMCLLMPrior(AsyncPrior):
 
         samples = [{**disc, **cont}]
 
-        for _ in tqdm(range(self.burn_in + n_samples * self.thinning), disable=not pbar, dynamic_ncols=True):
+        chain_length = self.burn_in + n_samples * self.thinning
+        for _ in tqdm(
+            range(chain_length), disable=pbar is None, position=pbar, desc=f"Chain {pbar}", dynamic_ncols=True
+        ):
             candidate = {}  # Prevent PossiblyUnboundVariable error from type checkers
             for _ in range(self.max_trials):  # Try up to max_trials times to generate a valid candidate
                 candidate_discrete = {}
