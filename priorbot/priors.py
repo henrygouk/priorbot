@@ -170,13 +170,13 @@ class AsyncPrior(Prior, ABC):
     ) -> list[dict[str, Any]]:
         results = asyncio.run(
             self._sample_impl_async(
-                n_samples_per_schema=1,
-                schema=[schema] * n_samples,
+                n_samples_per_schema=n_samples,
+                schema=[schema],
                 verbose=verbose,
                 pbar=pbar,
             )
         )
-        return [sample for chain_result in results for sample in chain_result]
+        return results[0]
 
     def sample_parallel(
         self,
@@ -204,14 +204,14 @@ class AsyncPrior(Prior, ABC):
     ) -> list[dict[str, Any]]:
         results = asyncio.run(
             self._sample_impl_async(
-                n_samples_per_schema=1,
-                schema=[schema] * n_samples,
-                observed=[observed] * n_samples,
+                n_samples_per_schema=n_samples,
+                schema=[schema],
+                observed=[observed],
                 verbose=verbose,
                 pbar=pbar,
             )
         )
-        return [sample for chain_result in results for sample in chain_result]
+        return results[0]
 
     def sample_conditional_parallel(
         self,
@@ -287,13 +287,13 @@ class LLMPrior(AsyncPrior):
         self,
         n_samples: int,
         schema: dict[str, Any],
-        observed: dict[str, Any] | None = None,
+        observed: dict[str, Any],
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[dict[str, Any]]:
         samples = []
         for _ in range(n_samples):
-            if observed is None:
+            if len(observed) == 0:
                 prompt = self.template(schema)
             else:
                 prompt = self.template_conditional(observed, schema)
