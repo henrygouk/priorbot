@@ -252,12 +252,21 @@ class AsyncPrior(Prior, ABC):
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[list[dict[str, Any]]]:
-        observed = observed or [{} for _ in range(len(schema))]
+        if observed is not None and len(observed) != len(schema):
+            raise ValueError(f"Number of observed samples ({len(observed)}) must match number of schemas ({len(schema)})")
 
         loop = asyncio.get_running_loop()
         tasks = [
-            loop.run_in_executor(None, self._sample_impl, n_samples_per_schema, s, o, verbose, pbar)
-            for s, o in zip(schema, observed)
+            loop.run_in_executor(
+                None,
+                self._sample_impl,
+                n_samples_per_schema,
+                schema[i],
+                observed[i] if observed is not None else None,
+                verbose,
+                pbar,
+            )
+            for i in range(len(schema))
         ]
         results = await asyncio.gather(*tasks)
         return results
@@ -267,7 +276,7 @@ class AsyncPrior(Prior, ABC):
         self,
         n_samples: int,
         schema: dict[str, Any],
-        observed: dict[str, Any],
+        observed: dict[str, Any] | None = None,
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[dict[str, Any]]:
@@ -300,13 +309,13 @@ class LLMPrior(AsyncPrior):
         self,
         n_samples: int,
         schema: dict[str, Any],
-        observed: dict[str, Any],
+        observed: dict[str, Any] | None = None,
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[dict[str, Any]]:
         samples = []
         for _ in range(n_samples):
-            if len(observed) == 0:
+            if observed is None:
                 prompt = self.template(schema)
             else:
                 prompt = self.template_conditional(observed, schema)
@@ -332,7 +341,7 @@ class GibbsLLMPrior(AsyncPrior):
         self,
         n_samples: int,
         schema: dict[str, Any],
-        observed: dict[str, Any],
+        observed: dict[str, Any] | None = None,
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[dict[str, Any]]:
@@ -353,7 +362,7 @@ class GibbsLLMPrior(AsyncPrior):
                 "required": [key_to_discard]
             }
 
-            all_observed = {**itr_observed, **observed}
+            all_observed = {**itr_observed, **(observed or {})}
             new_marginal = self.base_prior.sample_conditional(1, itr_schema, all_observed, verbose)[0]
             new_sample = itr_observed | new_marginal
             samples.append(new_sample)
@@ -393,10 +402,17 @@ class MCMCLLMPrior(AsyncPrior):
         self,
         n_samples: int,
         schema: dict[str, Any],
-        observed: dict[str, Any],
+        observed: dict[str, Any] | None = None,
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[dict[str, Any]]:
+
+        def _sample_single(proposal: Prior, s: dict[str, Any], o: dict[str, Any] | None = None) -> dict[str, Any]:
+            if o is None:
+                return proposal.sample(1, s, verbose)[0]
+            else:
+                return proposal.sample_conditional(1, s, o, verbose)[0]
+
         discrete_schema = {
             "type": "object",
             "properties": {key: value for key, value in schema["properties"].items() if value["type"] == "string"},
@@ -414,7 +430,7 @@ class MCMCLLMPrior(AsyncPrior):
 
         disc = {}
         if has_discrete_features:
-            disc = self.discrete_proposal_dist.sample_conditional(1, discrete_schema, observed, verbose)[0]
+            disc = _sample_single(self.discrete_proposal_dist, discrete_schema, observed)
 
         if has_continuous_features and any(("minimum" not in value or "maximum" not in value) for value in schema["properties"].values()):
             # means_prompt = f"Given the following schema: {json.dumps(schema)} provide a reasonable estimate for the population means for the " \
@@ -453,7 +469,7 @@ class MCMCLLMPrior(AsyncPrior):
 
         cont = {}
         if has_continuous_features:
-            cont = self.continuous_proposal_dist.sample_conditional(1, continuous_schema, observed, verbose)[0]
+            cont = _sample_single(self.continuous_proposal_dist, continuous_schema, observed)
 
         samples = [{**disc, **cont}]
 
@@ -462,15 +478,11 @@ class MCMCLLMPrior(AsyncPrior):
             for _ in range(self.max_trials):  # Try up to max_trials times to generate a valid candidate
                 candidate_discrete = {}
                 if has_discrete_features:
-                    candidate_discrete = self.discrete_proposal_dist.sample_conditional(
-                        1, discrete_schema, observed, verbose
-                    )[0]
+                    candidate_discrete = _sample_single(self.discrete_proposal_dist, discrete_schema, observed)
 
                 candidate_continuous = {}
                 if has_continuous_features:
-                    candidate_continuous = self.continuous_proposal_dist.sample_conditional(
-                        1, continuous_schema, observed, verbose
-                    )[0]
+                    candidate_continuous = _sample_single(self.continuous_proposal_dist, continuous_schema, observed)
 
                 # for k in candidate_continuous.keys():
                 #     candidate_continuous[k] = candidate_continuous[k] * stds[k] + samples[-1][k]
@@ -504,8 +516,6 @@ class MCMCLLMPrior(AsyncPrior):
                 if verbose:
                     print(f"Error during acceptance step: {e}. Rejecting candidate.")
                 raise e
-
-                samples.append(samples[-1])
 
             if verbose:
                 print(f"Generated {len(samples[self.burn_in::self.thinning][:n_samples])}/{n_samples} samples.")
