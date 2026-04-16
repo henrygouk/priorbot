@@ -3,7 +3,7 @@ from typing import Any
 import json
 
 
-def _check_schema_bounds(data: dict[str, Any], schema: dict[str, Any]) -> None:
+def _check_schema(data: dict[str, Any], schema: dict[str, Any]) -> None:
     """Return True if all numeric values satisfy the schema's minimum/maximum constraints."""
     props = schema.get("properties", {})
     for key, value in data.items():
@@ -17,6 +17,12 @@ def _check_schema_bounds(data: dict[str, Any], schema: dict[str, Any]) -> None:
             enum = props[key].get("enum")
             if enum is not None and value not in enum:
                 raise ValueError(f"Value {value} for key {key} is not in enum {enum} for schema {schema}")
+
+    required = schema.get("required", [])
+    for key in required:
+        if key not in data:
+            raise ValueError(f"Key {key} is required but not present in data {data} for schema {schema}")
+
 
 class LLM:
     def __init__(self, model_name: str, **kwargs):
@@ -167,15 +173,13 @@ class OpenAICompatLLM(LLM):
 
         if self._use_chat_api is None:
             try:
-                result = self._generate_chat(prompt, schema, verbose)
+                self._generate_chat(prompt, schema, verbose)
                 self._use_chat_api = True
-                return result
             except BadRequestError as e:
                 if "chat template" in str(e).lower():
                     print("\nModel has no chat template — falling back to completions API.")
                     self._use_chat_api = False
-                    return self._generate_completion(prompt, schema, verbose)
-                raise
+            return self.generate(prompt, schema, verbose)
 
         for _ in range(max_trials):
             try:
@@ -186,7 +190,7 @@ class OpenAICompatLLM(LLM):
 
                 if schema is not None:
                     assert isinstance(content, dict)  # JSON-formatted response
-                    _check_schema_bounds(content, schema)
+                    _check_schema(content, schema)
 
             except Exception as e:
                 print(f"Error during generation: {e}. Retrying...")
@@ -273,7 +277,7 @@ class OutlinesLocalLLM(LLM):
         output = self.model(input_ids, JsonSchema(schema) if schema else str)
         if schema is not None:
             assert isinstance(output, dict)  # JSON-formatted response
-            if not _check_schema_bounds(output, schema):
+            if not _check_schema(output, schema):
                 if max_trials > 0:
                     return self.generate(prompt, schema, verbose, max_trials - 1)
                 else:
@@ -281,6 +285,7 @@ class OutlinesLocalLLM(LLM):
                         f"Failed to generate a valid response after {max_trials} trials."
                     )
         return output
+
 
 if __name__ == "__main__":
     from argparse import ArgumentParser

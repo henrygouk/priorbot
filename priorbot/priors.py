@@ -1,4 +1,5 @@
-from abc import abstractmethod
+from abc import ABC, abstractmethod
+import asyncio
 from collections.abc import Callable
 import json
 import numpy as np
@@ -6,68 +7,261 @@ from typing import Any, cast
 from tqdm import tqdm
 from .llm import LLM
 
-class Prior:
+
+class Prior(ABC):
     def __init__(self):
         pass
 
     @abstractmethod
-    def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
+    def sample(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
         pass
 
     @abstractmethod
-    def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
+    def sample_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[list[dict[str, Any]]]:
         pass
+
+    @abstractmethod
+    def sample_conditional(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any],
+        verbose: bool = False,
+    ) -> list[dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    def sample_conditional_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        observed: list[dict[str, Any]],
+        verbose: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        pass
+
 
 class UniformPrior(Prior):
-    def __init__(self):
-        pass
+    def sample(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
+        samples_dict: dict[str, np.ndarray] = {}
+        for key, value in schema["properties"].items():
+            val_type = value["type"]
+            if val_type == "string" and "enum" in value:
+                samples_dict[key] = np.random.choice(value["enum"], size=n_samples)
+            elif val_type == "integer":
+                assert value.get("minimum") is not None and value.get("maximum") is not None
+                samples_dict[key] = np.random.randint(value["minimum"], value["maximum"], size=n_samples)
+            elif val_type == "number":
+                assert value.get("minimum") is not None and value.get("maximum") is not None
+                samples_dict[key] = np.random.uniform(value["minimum"], value["maximum"], size=n_samples)
+            else:
+                raise ValueError(f"Unsupported type {val_type} for key {key}")
 
-    def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
+        features = samples_dict.keys()
+        return [{k: v.item() for k, v in zip(features, values)} for values in zip(*samples_dict.values())]
+
+    def sample_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[list[dict[str, Any]]]:
         samples = []
-
-        for _ in tqdm(range(n_samples), disable=not pbar, dynamic_ncols=True):
-            sample = {}
-
-            for key, value in schema["properties"].items():
-                val_type = value["type"]
-                if val_type == "string" and "enum" in value:
-                    sample[key] = np.random.choice(value["enum"]).item()
-                elif val_type == "integer":
-                    sample[key] = np.random.randint(value.get("minimum", 0), value.get("maximum", 100))
-                elif val_type == "number":
-                    sample[key] = np.random.uniform(value.get("minimum", 0), value.get("maximum", 100))
-                else:
-                    raise ValueError(f"Unsupported type {val_type} for key {key}")
-
-            samples.append(sample)
-
+        for s in schema:
+            samples.append(self.sample(n_samples_per_schema, s, verbose, pbar))
         return samples
 
-    def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        return self.sample(1, schema, verbose)[0]
+    def sample_conditional(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any],
+        verbose: bool = False,
+    ) -> list[dict[str, Any]]:
+        return self.sample(n_samples, schema, verbose)
+
+    def sample_conditional_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        observed: list[dict[str, Any]],
+        verbose: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        return self.sample_parallel(n_samples_per_schema, schema, verbose)
+
 
 class GaussianPrior(Prior):
-    def __init__(self, mean: float = 0.0, std: float = 1.0):
-        self.mean = mean
-        self.std = std
+    def sample(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
+        samples_dict: dict[str, np.ndarray] = {}
+        for key, value in schema["properties"].items():
+            val_type = value["type"]
+            if val_type == "number":
+                assert value.get("mean") is not None and value.get("std") is not None
+                samples_dict[key] = np.random.normal(value["mean"], value["std"], size=n_samples)
+            else:
+                raise ValueError(f"Unsupported type {val_type} for key {key}")
 
-    def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
+        features = samples_dict.keys()
+        return [{k: v.item() for k, v in zip(features, values)} for values in zip(*samples_dict.values())]
+
+    def sample_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[list[dict[str, Any]]]:
         samples = []
-        for _ in tqdm(range(n_samples), disable=not pbar, dynamic_ncols=True):
-            sample = {}
-            for key, value in schema["properties"].items():
-                val_type = value["type"]
-                if val_type == "number" or val_type == "integer":
-                    sample[key] = np.random.normal(self.mean, self.std)
-                else:
-                    raise ValueError(f"Unsupported type {val_type} for key {key}")
-            samples.append(sample)
+        for s in schema:
+            samples.append(self.sample(n_samples_per_schema, s, verbose, pbar))
         return samples
 
-    def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        return self.sample(1, schema, verbose)[0]
+    def sample_conditional(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any],
+        verbose: bool = False,
+    ) -> list[dict[str, Any]]:
+        return self.sample(n_samples, schema, verbose)
 
-class LLMPrior(Prior):
+    def sample_conditional_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        observed: list[dict[str, Any]],
+        verbose: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        return self.sample_parallel(n_samples_per_schema, schema, verbose)
+
+
+class AsyncPrior(Prior, ABC):
+    def sample(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
+        results = asyncio.run(
+            self._sample_impl_async(
+                n_samples_per_schema=1,
+                schema=[schema] * n_samples,
+                verbose=verbose,
+                pbar=pbar,
+            )
+        )
+        return [sample for chain_result in results for sample in chain_result]
+
+    def sample_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        return asyncio.run(
+            self._sample_impl_async(
+                n_samples_per_schema=n_samples_per_schema,
+                schema=schema,
+                verbose=verbose,
+                pbar=pbar,
+            )
+        )
+
+    def sample_conditional(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
+        results = asyncio.run(
+            self._sample_impl_async(
+                n_samples_per_schema=1,
+                schema=[schema] * n_samples,
+                observed=[observed] * n_samples,
+                verbose=verbose,
+                pbar=pbar,
+            )
+        )
+        return [sample for chain_result in results for sample in chain_result]
+
+    def sample_conditional_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        observed: list[dict[str, Any]],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        return asyncio.run(
+            self._sample_impl_async(
+                n_samples_per_schema=n_samples_per_schema,
+                schema=schema,
+                observed=observed,
+                verbose=verbose,
+                pbar=pbar,
+            )
+        )
+
+    async def _sample_impl_async(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        observed: list[dict[str, Any]] | None = None,
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        observed = observed or [{} for _ in range(len(schema))]
+
+        loop = asyncio.get_running_loop()
+        tasks = [
+            loop.run_in_executor(None, self._sample_impl, n_samples_per_schema, s, o, verbose, pbar)
+            for s, o in zip(schema, observed)
+        ]
+        results = await asyncio.gather(*tasks)
+        return results
+
+    @abstractmethod
+    def _sample_impl(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
+        pass
+
+
+class LLMPrior(AsyncPrior):
     def __init__(
         self,
         llm: LLM,
@@ -89,52 +283,46 @@ class LLMPrior(Prior):
         self.template = template or _default_llm_template
         self.template_conditional = template_conditional or _default_llm_template_conditional
 
-    def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
+    def _sample_impl(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any] | None = None,
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
         samples = []
+        for _ in range(n_samples):
+            if observed is None:
+                prompt = self.template(schema)
+            else:
+                prompt = self.template_conditional(observed, schema)
 
-        pbar_samples = tqdm(total=n_samples, disable=not pbar, dynamic_ncols=True)
-        while len(samples) < n_samples:
-            input_str = self.template(schema)
-            sample = self._sample_impl(input_str, schema, verbose)
+            sample = self.llm.generate(prompt, schema, verbose)
 
-            if sample:
+            if isinstance(sample, dict):
                 samples.append(sample)
-                pbar_samples.update(1)
-
+            else:
                 if verbose:
-                    print(f"Generated {len(samples)}/{n_samples} samples.")
+                    print(f"LLM returned invalid output {sample}. Skipping.")
 
         return samples
 
-    def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        input_str = self.template_conditional(observed, schema)
-        sample = self._sample_impl(input_str, schema, verbose)
-        return sample
 
-    def _sample_impl(self, input_str: str, schema: dict[str, Any], verbose: bool) -> dict[str, Any]:
-        output = self.llm.generate(input_str, schema=schema, verbose=verbose)
-
-        if type(output) is not dict:
-            if verbose:
-                print(f"LLM returned invalid output {output}. Returning empty dict.")
-            return {}
-        else:
-            return output
-
-class GibbsLLMPrior(Prior):
-    def __init__(self, base_prior: Prior, burn_in: int = 10, thinning: int = 1):
+class GibbsLLMPrior(AsyncPrior):
+    def __init__(self, base_prior: Prior, burn_in: int, thinning: int):
         self.base_prior = base_prior
         self.burn_in = burn_in
         self.thinning = thinning
 
-    def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
-        return self._sample_impl(n_samples, schema, {}, verbose, pbar)
-
-    def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        samples = self._sample_impl(1, schema, observed, verbose, False)
-        return samples[0]
-
-    def _sample_impl(self, n_samples: int, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
+    def _sample_impl(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
         samples = self.base_prior.sample(1, schema, verbose, False)
 
         for _ in tqdm(range(self.burn_in + n_samples * self.thinning), disable=not pbar, dynamic_ncols=True):
@@ -153,7 +341,7 @@ class GibbsLLMPrior(Prior):
             }
 
             all_observed = {**itr_observed, **observed}
-            new_marginal = self.base_prior.sample_conditional(itr_schema, all_observed, verbose)
+            new_marginal = self.base_prior.sample_conditional(1, itr_schema, all_observed, verbose)[0]
             new_sample = itr_observed | new_marginal
             samples.append(new_sample)
 
@@ -164,14 +352,22 @@ class GibbsLLMPrior(Prior):
         thinned_samples = samples[self.burn_in::self.thinning][:n_samples]
         return thinned_samples
 
-class MCMCLLMPrior(Prior):
+
+class MCMCLLMPrior(AsyncPrior):
     """
     Use the Markov Chain Monta Carlo with People approach to sampling from the LLM. This uses the LLM to decide whether
     candidates in an MCMC chain should be accepted or rejected. This method relies on the proposal distribution being
     approximately uniform.
     """
 
-    def __init__(self, llm: LLM, burn_in: int = 10, thinning: int = 1, manual_reasoning: bool = False, max_trials: int = 10):
+    def __init__(
+        self,
+        llm: LLM,
+        burn_in: int,
+        thinning: int,
+        manual_reasoning: bool = False,
+        max_trials: int = 10,
+    ):
         self.llm = llm
         self.discrete_proposal_dist = UniformPrior()
         self.continuous_proposal_dist = UniformPrior()
@@ -180,14 +376,14 @@ class MCMCLLMPrior(Prior):
         self.manual_reasoning = manual_reasoning
         self.max_trials = max_trials
 
-    def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
-        return self._sample_impl(n_samples, schema, {}, verbose, pbar)
-
-    def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        samples = self._sample_impl(1, schema, observed, verbose, False)
-        return samples[0]
-
-    def _sample_impl(self, n_samples: int, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
+    def _sample_impl(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
         discrete_schema = {
             "type": "object",
             "properties": {key: value for key, value in schema["properties"].items() if value["type"] == "string"},
@@ -205,7 +401,7 @@ class MCMCLLMPrior(Prior):
 
         disc = {}
         if has_discrete_features:
-            disc = self.discrete_proposal_dist.sample_conditional(discrete_schema, observed, verbose)
+            disc = self.discrete_proposal_dist.sample_conditional(1, discrete_schema, observed, verbose)[0]
 
         if has_continuous_features and any(("minimum" not in value or "maximum" not in value) for value in schema["properties"].values()):
             # means_prompt = f"Given the following schema: {json.dumps(schema)} provide a reasonable estimate for the population means for the " \
@@ -244,7 +440,7 @@ class MCMCLLMPrior(Prior):
 
         cont = {}
         if has_continuous_features:
-            cont = self.continuous_proposal_dist.sample_conditional(continuous_schema, observed, verbose)
+            cont = self.continuous_proposal_dist.sample_conditional(1, continuous_schema, observed, verbose)[0]
 
         samples = [{**disc, **cont}]
 
@@ -254,14 +450,14 @@ class MCMCLLMPrior(Prior):
                 candidate_discrete = {}
                 if has_discrete_features:
                     candidate_discrete = self.discrete_proposal_dist.sample_conditional(
-                        discrete_schema, observed, verbose
-                    )
+                        1, discrete_schema, observed, verbose
+                    )[0]
 
                 candidate_continuous = {}
                 if has_continuous_features:
                     candidate_continuous = self.continuous_proposal_dist.sample_conditional(
-                        continuous_schema, observed, verbose
-                    )
+                        1, continuous_schema, observed, verbose
+                    )[0]
 
                 # for k in candidate_continuous.keys():
                 #     candidate_continuous[k] = candidate_continuous[k] * stds[k] + samples[-1][k]
@@ -305,18 +501,32 @@ class MCMCLLMPrior(Prior):
         return thinned_samples
 
     @abstractmethod
-    def _acceptance(self, option1: dict[str, Any], option2: dict[str, Any], schema: dict[str, Any], observed: dict[str, Any] | None = None, verbose: bool = False) -> bool:
+    def _acceptance(
+        self,
+        option1: dict[str, Any],
+        option2: dict[str, Any],
+        schema: dict[str, Any],
+        observed: dict[str, Any] | None = None,
+        verbose: bool = False,
+    ) -> bool:
         pass
 
-def barker_prompt_template(option1: dict[str, Any], option2: dict[str, Any], input_schema: dict[str, Any], output_schema: dict[str, Any], observed: dict[str, Any] | None = None) -> str:
+
+def barker_prompt_template(
+    option1: dict[str, Any],
+    option2: dict[str, Any],
+    input_schema: dict[str, Any],
+    output_schema: dict[str, Any],
+    observed: dict[str, Any] | None = None,
+) -> str:
     if observed:
         # FIXME: the `input_schema` is not aligned with `observed`
         return f"Given the observed features with these values: {json.dumps(observed)}, and the following schema: {json.dumps(input_schema)}, which of the following two options is more likely to be a valid data point? Option 1: {json.dumps(option1)}. Option 2: {json.dumps(option2)}. Respond in the format specified by this schema: {json.dumps(output_schema)}."
     else:
         return f"Which of the following two options is more likely? Option 1: {json.dumps(option1)}. Option 2: {json.dumps(option2)}. Respond in the format specified by this schema: {json.dumps(output_schema)}."
 
-class BarkerLLMPrior(MCMCLLMPrior):
 
+class BarkerLLMPrior(MCMCLLMPrior):
     def __init__(
         self,
         llm: LLM,
@@ -328,7 +538,14 @@ class BarkerLLMPrior(MCMCLLMPrior):
         super().__init__(llm, burn_in, thinning, manual_reasoning)
         self.prompt_template = prompt_template
 
-    def _acceptance(self, option1: dict[str, Any], option2: dict[str, Any], schema: dict[str, Any], observed: dict[str, Any] | None = None, verbose: bool = False) -> bool:
+    def _acceptance(
+        self,
+        option1: dict[str, Any],
+        option2: dict[str, Any],
+        schema: dict[str, Any],
+        observed: dict[str, Any] | None = None,
+        verbose: bool = False,
+    ) -> bool:
         binary_schema = {
             "type": "object",
             "properties": {
@@ -350,7 +567,15 @@ class BarkerLLMPrior(MCMCLLMPrior):
 
         return type(output) is dict and output.get("choice") == "Option 1"
 
-def gambling_prompt_template(option1: dict[str, Any], option2: dict[str, Any], input_schema: dict[str, Any], output_schema: dict[str, Any], bet_value: float, observed: dict[str, Any] | None = None) -> str:
+
+def gambling_prompt_template(
+    option1: dict[str, Any],
+    option2: dict[str, Any],
+    input_schema: dict[str, Any],
+    output_schema: dict[str, Any],
+    bet_value: float,
+    observed: dict[str, Any] | None = None,
+) -> str:
     if observed:
         return (
             "You will be presented with two sets of feature values for a data point, along with some observed "
@@ -367,6 +592,7 @@ def gambling_prompt_template(option1: dict[str, Any], option2: dict[str, Any], i
             f" JSON that conforms to this schema: {json.dumps(output_schema)}."
         )
 
+
 class GamblingLLMPrior(MCMCLLMPrior):
     def __init__(
         self,
@@ -379,7 +605,14 @@ class GamblingLLMPrior(MCMCLLMPrior):
         super().__init__(llm, burn_in, thinning, manual_reasoning)
         self.prompt_template = prompt_template
 
-    def _acceptance(self, option1: dict[str, Any], option2: dict[str, Any], schema: dict[str, Any], observed: dict[str, Any] | None = None, verbose: bool = False) -> bool:
+    def _acceptance(
+        self,
+        option1: dict[str, Any],
+        option2: dict[str, Any],
+        schema: dict[str, Any],
+        observed: dict[str, Any] | None = None,
+        verbose: bool = False,
+    ) -> bool:
         """
         Instead of asking the LLM to determine which point is most likely, we generate a random bet and ask the LLM which side of the bet they want to be on.
         """
@@ -401,40 +634,118 @@ class GamblingLLMPrior(MCMCLLMPrior):
 
         bet_value = np.round(np.random.rand() * 100, 2)
 
-        input_str = self.prompt_template(option1, option2, schema, binary_schema, bet_value, observed)
+        input_str = self.prompt_template(
+            option1, option2, schema, binary_schema, bet_value, observed
+        )
         output = self.llm.generate(input_str, binary_schema, verbose=verbose)
 
         return type(output) is dict and output.get("bet") == "Place Bet"
+
 
 class SplitJointConditionalPrior(Prior):
     def __init__(self, joint_prior: Prior, conditional_prior: Prior):
         self.joint_prior = joint_prior
         self.conditional_prior = conditional_prior
 
-    def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
+    def sample(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
         return self.joint_prior.sample(n_samples, schema, verbose, pbar)
 
-    def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        return self.conditional_prior.sample_conditional(schema, observed, verbose)
+    def sample_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        return self.joint_prior.sample_parallel(n_samples_per_schema, schema, verbose, pbar)
+
+    def sample_conditional(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any],
+        verbose: bool = False,
+    ) -> list[dict[str, Any]]:
+        return self.conditional_prior.sample_conditional(n_samples, schema, observed, verbose)
+
+    def sample_conditional_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        observed: list[dict[str, Any]],
+        verbose: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        return self.conditional_prior.sample_conditional_parallel(
+            n_samples_per_schema, schema, observed, verbose
+        )
+
 
 class EmpiricalPrior(Prior):
     def __init__(self, samples: list[dict[str, Any]]):
         self.samples = samples
 
     @staticmethod
-    def from_prior(base_prior: Prior, n_samples: int, schema: dict[str, Any], verbose: bool = False) -> 'EmpiricalPrior':
+    def from_prior(
+        base_prior: Prior,
+        n_samples: int,
+        schema: dict[str, Any],
+        verbose: bool = False,
+    ) -> 'EmpiricalPrior':
         samples = base_prior.sample(n_samples, schema, verbose)
         return EmpiricalPrior(samples)
 
-    def sample(self, n_samples: int, schema: dict[str, Any], verbose: bool = False, pbar: bool = False) -> list[dict[str, Any]]:
-        filtered_samples = []
-        for _ in tqdm(range(n_samples), disable=not pbar, dynamic_ncols=True):
-            sample = self.samples[np.random.randint(0, len(self.samples))]
-            filtered_sample = {key: value for key, value in sample.items() if key in schema["properties"]}
-            filtered_samples.append(filtered_sample)
+    def _filter_to_schema(
+        self,
+        sample: dict[str, Any],
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        props = schema["properties"]
+        return {k: v for k, v in sample.items() if k in props}
 
-        return filtered_samples
+    def sample(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[dict[str, Any]]:
+        indices = np.random.randint(0, len(self.samples), size=n_samples)
+        return [self._filter_to_schema(self.samples[i], schema) for i in indices]
 
-    def sample_conditional(self, schema: dict[str, Any], observed: dict[str, Any], verbose: bool = False) -> dict[str, Any]:
-        # Can't do conditional sampling properly---we will just have to ignore conditioned observations
-        return self.sample(n_samples=1, schema=schema, verbose=verbose)[0]
+    def sample_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        verbose: bool = False,
+        pbar: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        samples = []
+        for s in schema:
+            samples.append(self.sample(n_samples_per_schema, s, verbose, pbar))
+        return samples
+
+    def sample_conditional(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any],
+        verbose: bool = False,
+    ) -> list[dict[str, Any]]:
+        # Can't condition on observations — just draw from the marginal
+        return self.sample(n_samples, schema, verbose)
+
+    def sample_conditional_parallel(
+        self,
+        n_samples_per_schema: int,
+        schema: list[dict[str, Any]],
+        observed: list[dict[str, Any]],
+        verbose: bool = False,
+    ) -> list[list[dict[str, Any]]]:
+        # Can't condition on observations — just draw from the marginal
+        return self.sample_parallel(n_samples_per_schema, schema, verbose)
