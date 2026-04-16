@@ -3,7 +3,7 @@ import asyncio
 from collections.abc import Callable
 import json
 import numpy as np
-from typing import Any, cast
+from typing import Any, Coroutine, cast
 from tqdm import tqdm
 from .llm import LLM
 
@@ -161,6 +161,17 @@ class GaussianPrior(Prior):
 
 
 class AsyncPrior(Prior, ABC):
+    @staticmethod
+    def _run_async(coro: Coroutine) -> Any:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        else:
+            import nest_asyncio
+            nest_asyncio.apply()
+            return loop.run_until_complete(coro)
+
     def sample(
         self,
         n_samples: int,
@@ -168,7 +179,7 @@ class AsyncPrior(Prior, ABC):
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[dict[str, Any]]:
-        results = asyncio.run(
+        results = self._run_async(
             self._sample_impl_async(
                 n_samples_per_schema=n_samples,
                 schema=[schema],
@@ -185,7 +196,7 @@ class AsyncPrior(Prior, ABC):
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[list[dict[str, Any]]]:
-        return asyncio.run(
+        return self._run_async(
             self._sample_impl_async(
                 n_samples_per_schema=n_samples_per_schema,
                 schema=schema,
@@ -202,7 +213,7 @@ class AsyncPrior(Prior, ABC):
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[dict[str, Any]]:
-        results = asyncio.run(
+        results = self._run_async(
             self._sample_impl_async(
                 n_samples_per_schema=n_samples,
                 schema=[schema],
@@ -221,7 +232,7 @@ class AsyncPrior(Prior, ABC):
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[list[dict[str, Any]]]:
-        return asyncio.run(
+        return self._run_async(
             self._sample_impl_async(
                 n_samples_per_schema=n_samples_per_schema,
                 schema=schema,

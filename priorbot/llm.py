@@ -4,7 +4,7 @@ import json
 
 
 def _check_schema(data: dict[str, Any], schema: dict[str, Any]) -> None:
-    """Return True if all numeric values satisfy the schema's minimum/maximum constraints."""
+    """Raise an error if the data does not satisfy the schema."""
     props = schema.get("properties", {})
     for key, value in data.items():
         if key in props and props[key]["type"] in ["number", "integer"]:
