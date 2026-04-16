@@ -66,6 +66,5 @@ if __name__ == "__main__":
         case _:
             raise ValueError("Invalid prior type")
 
-    # samples = prior.sample(100, schema, verbose=True, pbar=True)
-    samples = prior.sample_parallel(5, [schema] * 10, verbose=True, pbar=True)
+    samples = prior.sample(100, schema, verbose=True, pbar=True)
     print(samples)
