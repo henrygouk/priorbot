@@ -324,9 +324,8 @@ class LLMPrior(AsyncPrior):
 
             if isinstance(sample, dict):
                 samples.append(sample)
-            else:
-                if verbose:
-                    print(f"LLM returned invalid output {sample}. Skipping.")
+            else:  # String should not be given as output (see .generate methods in llm.py)
+                raise ValueError(f"LLM returned invalid output {sample}.")
 
         return samples
 

@@ -179,6 +179,9 @@ class OpenAICompatLLM(LLM):
                 if "chat template" in str(e).lower():
                     print("\nModel has no chat template — falling back to completions API.")
                     self._use_chat_api = False
+                else:
+                    raise
+
             return self.generate(prompt, schema, verbose)
 
         for _ in range(max_trials):
