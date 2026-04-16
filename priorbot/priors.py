@@ -66,12 +66,13 @@ class UniformPrior(Prior):
             val_type = value["type"]
             if val_type == "string" and "enum" in value:
                 samples_dict[key] = np.random.choice(value["enum"], size=n_samples)
-            elif val_type == "integer":
-                assert value.get("minimum") is not None and value.get("maximum") is not None
-                samples_dict[key] = np.random.randint(value["minimum"], value["maximum"], size=n_samples)
-            elif val_type == "number":
-                assert value.get("minimum") is not None and value.get("maximum") is not None
-                samples_dict[key] = np.random.uniform(value["minimum"], value["maximum"], size=n_samples)
+            elif val_type == "integer" or val_type == "number":
+                if value.get("minimum") is None or value.get("maximum") is None:
+                    raise ValueError(f"Minimum and maximum must be specified for integer type {key}")
+                if val_type == "integer":
+                    samples_dict[key] = np.random.randint(value["minimum"], value["maximum"], size=n_samples)
+                else:  # number
+                    samples_dict[key] = np.random.uniform(value["minimum"], value["maximum"], size=n_samples)
             else:
                 raise ValueError(f"Unsupported type {val_type} for key {key}")
 
@@ -121,7 +122,8 @@ class GaussianPrior(Prior):
         for key, value in schema["properties"].items():
             val_type = value["type"]
             if val_type == "number":
-                assert value.get("mean") is not None and value.get("std") is not None
+                if value.get("mean") is None or value.get("std") is None:
+                    raise ValueError(f"Mean and standard deviation must be specified for number type {key}")
                 samples_dict[key] = np.random.normal(value["mean"], value["std"], size=n_samples)
             else:
                 raise ValueError(f"Unsupported type {val_type} for key {key}")

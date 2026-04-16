@@ -189,7 +189,8 @@ class OpenAICompatLLM(LLM):
                     content = self._generate_completion(prompt, schema, verbose)
 
                 if schema is not None:
-                    assert isinstance(content, dict)  # JSON-formatted response
+                    if not isinstance(content, dict):  # JSON-formatted response
+                        raise ValueError(f"Response is not a dictionary: {content}")
                     _check_schema(content, schema)
 
             except Exception as e:
@@ -274,17 +275,24 @@ class OutlinesLocalLLM(LLM):
         ]
 
         input_ids = self.hf_tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
-        output = self.model(input_ids, JsonSchema(schema) if schema else str)
-        if schema is not None:
-            assert isinstance(output, dict)  # JSON-formatted response
-            if not _check_schema(output, schema):
-                if max_trials > 0:
-                    return self.generate(prompt, schema, verbose, max_trials - 1)
-                else:
-                    raise RuntimeError(
-                        f"Failed to generate a valid response after {max_trials} trials."
-                    )
-        return output
+
+        for _ in range(max_trials):
+            try:
+                output = self.model(input_ids, JsonSchema(schema) if schema else str)
+
+                if schema is not None:
+                    if not isinstance(output, dict):  # JSON-formatted response
+                        raise ValueError(f"Response is not a dictionary: {output}")
+
+                    _check_schema(output, schema)
+
+            except Exception as e:
+                print(f"Error during generation: {e}. Retrying...")
+                continue
+
+            return output
+
+        raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
 
 
 if __name__ == "__main__":
