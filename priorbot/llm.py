@@ -108,15 +108,7 @@ class OpenAICompatLLM(LLM):
         }
 
         if schema is not None:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "output_schema",
-                    "schema": schema,
-                }
-            }
-            if verbose:
-                print(f"Response format: ```\n{kwargs['response_format']}\n```")
+            kwargs["extra_body"] = {"structured_outputs": {"json": schema}}
 
         response = self.client.chat.completions.create(**kwargs)
         if verbose:

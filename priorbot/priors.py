@@ -290,6 +290,7 @@ class LLMPrior(AsyncPrior):
         template: Callable[[dict[str, Any]], str] | None = None,
         template_conditional: Callable[[dict[str, Any], dict[str, Any]], str] | None = None,
         manual_reasoning: bool = False,
+        shuffle_variables: bool = True,
     ):
         self.llm = llm
 
@@ -305,6 +306,9 @@ class LLMPrior(AsyncPrior):
         self.template = template or _default_llm_template
         self.template_conditional = template_conditional or _default_llm_template_conditional
 
+        self.manual_reasoning = manual_reasoning
+        self.shuffle_variables = shuffle_variables
+
     def _sample_impl(
         self,
         n_samples: int,
@@ -317,6 +321,12 @@ class LLMPrior(AsyncPrior):
         for _ in tqdm(
             range(n_samples), disable=pbar is None, position=pbar, desc=f"Worker {pbar}", dynamic_ncols=True
         ):
+
+            if self.shuffle_variables:
+                keys = list(schema["properties"].keys())
+                np.random.shuffle(keys)
+                schema["properties"] = {k: schema["properties"][k] for k in keys}
+
             if observed is None:
                 prompt = self.template(schema)
             else:
