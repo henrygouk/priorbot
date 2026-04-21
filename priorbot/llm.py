@@ -174,8 +174,6 @@ class OpenAICompatLLM(LLM):
                 else:
                     raise
 
-            return self.generate(prompt, schema, verbose)
-
         for _ in range(max_trials):
             try:
                 if self._use_chat_api:

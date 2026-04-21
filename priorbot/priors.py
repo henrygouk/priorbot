@@ -22,7 +22,6 @@ class Prior(ABC):
     ) -> list[dict[str, Any]]:
         pass
 
-    @abstractmethod
     def sample_parallel(
         self,
         n_samples_per_schema: int,
@@ -30,7 +29,10 @@ class Prior(ABC):
         verbose: bool = False,
         pbar: bool = False,
     ) -> list[list[dict[str, Any]]]:
-        pass
+        samples = []
+        for s in schema:
+            samples.append(self.sample(n_samples_per_schema, s, verbose, pbar))
+        return samples
 
     @abstractmethod
     def sample_conditional(
@@ -42,7 +44,6 @@ class Prior(ABC):
     ) -> list[dict[str, Any]]:
         pass
 
-    @abstractmethod
     def sample_conditional_parallel(
         self,
         n_samples_per_schema: int,
@@ -50,7 +51,10 @@ class Prior(ABC):
         observed: list[dict[str, Any]],
         verbose: bool = False,
     ) -> list[list[dict[str, Any]]]:
-        pass
+        samples = []
+        for s, o in zip(schema, observed):
+            samples.append(self.sample_conditional(n_samples_per_schema, s, o, verbose))
+        return samples
 
 
 class UniformPrior(Prior):
@@ -79,18 +83,6 @@ class UniformPrior(Prior):
         features = samples_dict.keys()
         return [{k: v.item() for k, v in zip(features, values)} for values in zip(*samples_dict.values())]
 
-    def sample_parallel(
-        self,
-        n_samples_per_schema: int,
-        schema: list[dict[str, Any]],
-        verbose: bool = False,
-        pbar: bool = False,
-    ) -> list[list[dict[str, Any]]]:
-        samples = []
-        for s in schema:
-            samples.append(self.sample(n_samples_per_schema, s, verbose, pbar))
-        return samples
-
     def sample_conditional(
         self,
         n_samples: int,
@@ -98,17 +90,8 @@ class UniformPrior(Prior):
         observed: dict[str, Any],
         verbose: bool = False,
     ) -> list[dict[str, Any]]:
+        # Can't condition on observations — just draw from the marginal
         return self.sample(n_samples, schema, verbose)
-
-    def sample_conditional_parallel(
-        self,
-        n_samples_per_schema: int,
-        schema: list[dict[str, Any]],
-        observed: list[dict[str, Any]],
-        verbose: bool = False,
-    ) -> list[list[dict[str, Any]]]:
-        return self.sample_parallel(n_samples_per_schema, schema, verbose)
-
 
 class GaussianPrior(Prior):
     def sample(
@@ -131,18 +114,6 @@ class GaussianPrior(Prior):
         features = samples_dict.keys()
         return [{k: v.item() for k, v in zip(features, values)} for values in zip(*samples_dict.values())]
 
-    def sample_parallel(
-        self,
-        n_samples_per_schema: int,
-        schema: list[dict[str, Any]],
-        verbose: bool = False,
-        pbar: bool = False,
-    ) -> list[list[dict[str, Any]]]:
-        samples = []
-        for s in schema:
-            samples.append(self.sample(n_samples_per_schema, s, verbose, pbar))
-        return samples
-
     def sample_conditional(
         self,
         n_samples: int,
@@ -150,16 +121,8 @@ class GaussianPrior(Prior):
         observed: dict[str, Any],
         verbose: bool = False,
     ) -> list[dict[str, Any]]:
+        # Can't condition on observations — just draw from the marginal
         return self.sample(n_samples, schema, verbose)
-
-    def sample_conditional_parallel(
-        self,
-        n_samples_per_schema: int,
-        schema: list[dict[str, Any]],
-        observed: list[dict[str, Any]],
-        verbose: bool = False,
-    ) -> list[list[dict[str, Any]]]:
-        return self.sample_parallel(n_samples_per_schema, schema, verbose)
 
 
 class AsyncPrior(Prior, ABC):
@@ -758,18 +721,6 @@ class EmpiricalPrior(Prior):
         indices = np.random.randint(0, len(self.samples), size=n_samples)
         return [self._filter_to_schema(self.samples[i], schema) for i in indices]
 
-    def sample_parallel(
-        self,
-        n_samples_per_schema: int,
-        schema: list[dict[str, Any]],
-        verbose: bool = False,
-        pbar: bool = False,
-    ) -> list[list[dict[str, Any]]]:
-        samples = []
-        for s in schema:
-            samples.append(self.sample(n_samples_per_schema, s, verbose, pbar))
-        return samples
-
     def sample_conditional(
         self,
         n_samples: int,
@@ -779,13 +730,3 @@ class EmpiricalPrior(Prior):
     ) -> list[dict[str, Any]]:
         # Can't condition on observations — just draw from the marginal
         return self.sample(n_samples, schema, verbose)
-
-    def sample_conditional_parallel(
-        self,
-        n_samples_per_schema: int,
-        schema: list[dict[str, Any]],
-        observed: list[dict[str, Any]],
-        verbose: bool = False,
-    ) -> list[list[dict[str, Any]]]:
-        # Can't condition on observations — just draw from the marginal
-        return self.sample_parallel(n_samples_per_schema, schema, verbose)
