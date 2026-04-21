@@ -25,7 +25,7 @@ if __name__ == "__main__":
         case "direct":
             base_prior = LLMPrior(llm=llm)
         case "gibbs":
-            base_prior = GibbsLLMPrior(base_prior=LLMPrior(llm=llm), thinning=5)
+            base_prior = GibbsLLMPrior(base_prior=LLMPrior(llm=llm), burn_in=10, thinning=5)
         case "barker":
             base_prior = BarkerLLMPrior(llm=llm, thinning=5)
         case "gambling":

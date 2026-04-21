@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.13"
 
 [[package]]
@@ -791,6 +791,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pydantic" },
     { name = "scikit-learn" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -812,6 +813,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pydantic", specifier = ">=2.12.3" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
+    { name = "tqdm", specifier = ">=4.67.1" },
     { name = "transformers", marker = "extra == 'local-llm'", specifier = ">=4.57.1" },
 ]
 provides-extras = ["local-llm", "remote-llm"]

@@ -3,8 +3,8 @@ from typing import Any
 import json
 
 
-def _check_schema_bounds(data: dict[str, Any], schema: dict[str, Any]) -> None:
-    """Return True if all numeric values satisfy the schema's minimum/maximum constraints."""
+def _check_schema(data: dict[str, Any], schema: dict[str, Any]) -> None:
+    """Raise an error if the data does not satisfy the schema."""
     props = schema.get("properties", {})
     for key, value in data.items():
         if key in props and props[key]["type"] in ["number", "integer"]:
@@ -17,6 +17,12 @@ def _check_schema_bounds(data: dict[str, Any], schema: dict[str, Any]) -> None:
             enum = props[key].get("enum")
             if enum is not None and value not in enum:
                 raise ValueError(f"Value {value} for key {key} is not in enum {enum} for schema {schema}")
+
+    required = schema.get("required", [])
+    for key in required:
+        if key not in data:
+            raise ValueError(f"Key {key} is required but not present in data {data} for schema {schema}")
+
 
 class LLM:
     def __init__(self, model_name: str, **kwargs):
@@ -109,8 +115,6 @@ class OpenAICompatLLM(LLM):
                     "schema": schema,
                 }
             }
-            if verbose:
-                print(f"Response format: ```\n{kwargs['response_format']}\n```")
 
         response = self.client.chat.completions.create(**kwargs)
         if verbose:
@@ -167,15 +171,14 @@ class OpenAICompatLLM(LLM):
 
         if self._use_chat_api is None:
             try:
-                result = self._generate_chat(prompt, schema, verbose)
+                self._generate_chat(prompt, schema, verbose)
                 self._use_chat_api = True
-                return result
             except BadRequestError as e:
                 if "chat template" in str(e).lower():
                     print("\nModel has no chat template — falling back to completions API.")
                     self._use_chat_api = False
-                    return self._generate_completion(prompt, schema, verbose)
-                raise
+                else:
+                    raise
 
         for _ in range(max_trials):
             try:
@@ -185,8 +188,9 @@ class OpenAICompatLLM(LLM):
                     content = self._generate_completion(prompt, schema, verbose)
 
                 if schema is not None:
-                    assert isinstance(content, dict)  # JSON-formatted response
-                    _check_schema_bounds(content, schema)
+                    if not isinstance(content, dict):  # JSON-formatted response
+                        raise ValueError(f"Response is not a dictionary: {content}")
+                    _check_schema(content, schema)
 
             except Exception as e:
                 print(f"Error during generation: {e}. Retrying...")
@@ -270,17 +274,25 @@ class OutlinesLocalLLM(LLM):
         ]
 
         input_ids = self.hf_tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
-        output = self.model(input_ids, JsonSchema(schema) if schema else str)
-        if schema is not None:
-            assert isinstance(output, dict)  # JSON-formatted response
-            if not _check_schema_bounds(output, schema):
-                if max_trials > 0:
-                    return self.generate(prompt, schema, verbose, max_trials - 1)
-                else:
-                    raise RuntimeError(
-                        f"Failed to generate a valid response after {max_trials} trials."
-                    )
-        return output
+
+        for _ in range(max_trials):
+            try:
+                output = self.model(input_ids, JsonSchema(schema) if schema else str)
+
+                if schema is not None:
+                    if not isinstance(output, dict):  # JSON-formatted response
+                        raise ValueError(f"Response is not a dictionary: {output}")
+
+                    _check_schema(output, schema)
+
+            except Exception as e:
+                print(f"Error during generation: {e}. Retrying...")
+                continue
+
+            return output
+
+        raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
+
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
