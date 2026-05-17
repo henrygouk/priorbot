@@ -571,7 +571,7 @@ class MCMCLLMPrior(AsyncPrior):
                 if verbose:
                     print(f"Current sample: {current}, Candidate: {candidate}")
 
-                if self._acceptance(options[0], options[1], schema, observed, verbose=verbose):
+                if self._acceptance(options[0], options[1], observed, verbose=verbose):
                     samples.append(options[0])
                 else:
                     samples.append(options[1])
@@ -591,7 +591,6 @@ class MCMCLLMPrior(AsyncPrior):
         self,
         option1: dict[str, Any],
         option2: dict[str, Any],
-        schema: dict[str, Any],
         observed: dict[str, Any] | None = None,
         verbose: bool = False,
     ) -> bool:
@@ -601,15 +600,22 @@ class MCMCLLMPrior(AsyncPrior):
 def default_barker_template(
     option1: dict[str, Any],
     option2: dict[str, Any],
-    input_schema: dict[str, Any],  # FIXME: should we use this in the prompt, or remove it?
     output_schema: dict[str, Any],
     observed: dict[str, Any] | None = None,
 ) -> str:
+    template = ""
     if observed:
-        return f"Given the observed features with these values: {json.dumps(observed)}, which of the following two options is more likely to be a valid data point? Option 1: {json.dumps(option1)}. Option 2: {json.dumps(option2)}. Respond in the format specified by this schema: {json.dumps(output_schema)}."
+        template += (
+            f"Given the observed features with these values: {json.dumps(observed)}, "
+            "which of the following two options is more likely to be a valid data point? "
+        )
     else:
-        return f"Which of the following two options is more likely? Option 1: {json.dumps(option1)}. Option 2: {json.dumps(option2)}. Respond in the format specified by this schema: {json.dumps(output_schema)}."
-
+        template += f"Which of the following two options is more likely to be a valid data point? "
+    template += (
+        f"Option 1: {json.dumps(option1)}. Option 2: {json.dumps(option2)}. "
+        f"Respond in the format specified by this schema: {json.dumps(output_schema)}."
+    )
+    return template
 
 class BarkerLLMPrior(MCMCLLMPrior):
     def __init__(
@@ -620,7 +626,7 @@ class BarkerLLMPrior(MCMCLLMPrior):
         shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
-        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
     ):
         super().__init__(llm, burn_in, thinning, shuffle_variables, manual_reasoning, max_trials)
         self.template = template
@@ -629,7 +635,6 @@ class BarkerLLMPrior(MCMCLLMPrior):
         self,
         option1: dict[str, Any],
         option2: dict[str, Any],
-        schema: dict[str, Any],
         observed: dict[str, Any] | None = None,
         verbose: bool = False,
     ) -> bool:
@@ -654,7 +659,7 @@ class BarkerLLMPrior(MCMCLLMPrior):
             }
             binary_schema["required"] = ["reasoning"] + binary_schema["required"]
 
-        input_str = self.template(option1, option2, schema, binary_schema, observed)
+        input_str = self.template(option1, option2, binary_schema, observed)
         output = self.llm.generate(input_str, binary_schema, verbose=verbose)
 
         return type(output) is dict and output.get("choice") == "Option 1"
@@ -663,26 +668,27 @@ class BarkerLLMPrior(MCMCLLMPrior):
 def default_gambling_template(
     option1: dict[str, Any],
     option2: dict[str, Any],
-    input_schema: dict[str, Any],  # FIXME: should we use this in the prompt, or remove it?
     output_schema: dict[str, Any],
     bet_value: float,
     observed: dict[str, Any] | None = None,
 ) -> str:
+    template = ""
     if observed:
-        return (
+        template += (
             "You will be presented with two sets of feature values for a data point, along with some observed "
-            f"features with these values: {json.dumps(observed)}. One of these is real and the other is fake. You have the opportunity"
-            f" to place a bet of ${bet_value} that Option 1 is more plausible, which will pay out $100 if you are "
-            f"correct. Your aim is to maximise profit. Option 1 is {json.dumps(option1)} and Option 2 is {json.dumps(option2)}. Respond with"
-            f" JSON that conforms to this schema: {json.dumps(output_schema)}."
+            f"features with these values: {json.dumps(observed)}. One of these is real and the other is fake. "
         )
     else:
-        return (
-            "You will be presented with two sets of feature values for a data point. One of these is real and the other is fake. You have the opportunity to "
-            f"place a bet of ${bet_value} that Option 1 is more plausible, which will pay out $100 if you are "
-            f"correct. Your aim is to maximise profit. Option 1 is {json.dumps(option1)} and Option 2 is {json.dumps(option2)}. Respond with"
-            f" JSON that conforms to this schema: {json.dumps(output_schema)}."
+        template += (
+            "You will be presented with two sets of feature values for a data point. One of these is real and the other is fake. "
         )
+    template += (
+        f"You have the opportunity to place a bet of ${bet_value} that Option 1 is more plausible, "
+        "which will pay out $100 if you are correct. Your aim is to maximise profit. "
+        f"Option 1 is {json.dumps(option1)} and Option 2 is {json.dumps(option2)}. "
+        f"Respond with JSON that conforms to this schema: {json.dumps(output_schema)}."
+    )
+    return template
 
 
 class GamblingLLMPrior(MCMCLLMPrior):
@@ -694,7 +700,7 @@ class GamblingLLMPrior(MCMCLLMPrior):
         shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
-        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
     ):
         super().__init__(llm, burn_in, thinning, shuffle_variables, manual_reasoning, max_trials)
         self.template = template
@@ -703,7 +709,6 @@ class GamblingLLMPrior(MCMCLLMPrior):
         self,
         option1: dict[str, Any],
         option2: dict[str, Any],
-        schema: dict[str, Any],
         observed: dict[str, Any] | None = None,
         verbose: bool = False,
     ) -> bool:
@@ -733,7 +738,7 @@ class GamblingLLMPrior(MCMCLLMPrior):
 
         bet_value = np.round(np.random.rand() * 100, 2)
 
-        input_str = self.template(option1, option2, schema, binary_schema, bet_value, observed)
+        input_str = self.template(option1, option2, binary_schema, bet_value, observed)
         output = self.llm.generate(input_str, binary_schema, verbose=verbose)
 
         return type(output) is dict and output.get("bet") == "Place Bet"
@@ -834,7 +839,7 @@ class MetropolisWithinGibbsLLMPrior(MCMCLLMPrior):
                 if verbose:
                     print(f"Current sample: {itr_discard}, Candidate: {candidate}")
 
-                if self._acceptance(options[0], options[1], itr_schema, all_observed, verbose=verbose):
+                if self._acceptance(options[0], options[1], all_observed, verbose=verbose):
                     new_sample = itr_observed | options[0]
                 else:
                     new_sample = itr_observed | options[1]
@@ -873,7 +878,7 @@ class BarkerGibbsLLMPrior(MetropolisWithinGibbsLLMPrior, BarkerLLMPrior):
         shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
-        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
     ):
         super().__init__(
             llm, burn_in, thinning, block_size, sweep, shuffle_variables, manual_reasoning, max_trials,
@@ -902,7 +907,7 @@ class GamblingGibbsLLMPrior(MetropolisWithinGibbsLLMPrior, GamblingLLMPrior):
         shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
-        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
     ):
         super().__init__(
             llm, burn_in, thinning, block_size, sweep, shuffle_variables, manual_reasoning, max_trials,
