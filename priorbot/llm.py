@@ -155,7 +155,7 @@ class OpenAICompatLLM(LLM):
 
     @staticmethod
     def _structured_outputs_kwargs(
-        schema: dict[str, Any] | str | list[str],
+        schema: dict[str, Any] | str | list[str], use_chat_api: bool
     ) -> dict[str, Any]:
         """Build the vLLM ``extra_body``/``response_format`` payload for ``schema``.
 
@@ -164,65 +164,40 @@ class OpenAICompatLLM(LLM):
         - ``str``: treat as a regex pattern.
         - ``dict``: treat as a JSON schema.
         """
-        if isinstance(schema, list):
-            schema_dict = {"choice": schema}
-        elif isinstance(schema, str):
-            schema_dict = {"regex": schema}
-        else:
-            schema_dict = {"json": _strip_xgrammar_buggy_number_bounds(schema)}
-        return {"extra_body": {"structured_outputs": schema_dict}}
+        if isinstance(schema, dict):
+            schema = _strip_xgrammar_buggy_number_bounds(schema)
 
-    def _generate_chat(
-        self, prompt: str, schema: None | dict[str, Any] | str | list[str], verbose: bool
-    ) -> str | dict[str, Any]:
-        chat = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        if verbose:
-            print(f"Chat prompt: ```\n{chat}\n```")
-
-        kwargs = {
-            "model": self.model_name,
-            "messages": chat,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-        }
-
-        if schema is not None:
-            if isinstance(schema, dict):
+            if use_chat_api:
                 # JSON schema is best expressed through response_format on chat.
-                kwargs["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "output_schema",
-                        "schema": _strip_xgrammar_buggy_number_bounds(schema),
-                    },
+                return {
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "output_schema",
+                            "schema": schema,
+                        },
+                    }
                 }
             else:
-                kwargs.update(self._structured_outputs_kwargs(schema))
+                return {"extra_body": {"structured_outputs": {"json": schema}}}
 
-        response = self.client.chat.completions.create(**kwargs)
-        if verbose:
-            print(f"Response: ```\n{response}\n```")
+        elif isinstance(schema, list):
+            return {"extra_body": {"structured_outputs": {"choice": schema}}}
+        elif isinstance(schema, str):
+            return {"extra_body": {"structured_outputs": {"regex": schema}}}
+        else:
+            raise ValueError(f"Invalid schema type: {type(schema)}")
 
-        content = response.choices[0].message.content
-        if isinstance(schema, dict):
-            return json.loads(content)
-        return content
-
-    def _generate_completion(
-        self, prompt: str, schema: None | dict[str, Any] | str | list[str], verbose: bool
-    ) -> str | dict[str, Any]:
-        prompt = f"{(self.system_prompt + '\n') if self.system_prompt else ''}{prompt}"
-        if verbose:
-            print(f"Completion prompt: ```\n{prompt}\n```")
-
+    def _prepare_kwargs(
+        self,
+        prompt: str,
+        schema: None | dict[str, Any] | str | list[str],
+        use_chat_api: bool,
+        verbose: bool,
+    ) -> dict[str, Any]:
         kwargs = {
             "model": self.model_name,
-            "prompt": prompt,
-            "max_tokens": self.max_tokens,  # openai completions default is 16
+            "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "top_p": self.top_p,
         }
@@ -230,13 +205,43 @@ class OpenAICompatLLM(LLM):
         if schema is not None:
             # For vllm >= 0.12.0; this might not work for other libraries
             # (e.g., Ollama) or older versions of vllm.
-            kwargs.update(self._structured_outputs_kwargs(schema))
+            kwargs.update(self._structured_outputs_kwargs(schema, use_chat_api))
 
-        response = self.client.completions.create(**kwargs)
+        if use_chat_api:
+            chat = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+            if verbose:
+                print(f"Chat prompt: ```\n{chat}\n```")
+            kwargs["messages"] = chat
+        else:
+            kwargs["prompt"] = (
+                f"{(self.system_prompt + '\n') if self.system_prompt else ''}{prompt}"
+            )
+            if verbose:
+                print(f"Completion prompt: ```\n{kwargs['prompt']}\n```")
+        return kwargs
+
+    def _generate(
+        self,
+        prompt: str,
+        schema: None | dict[str, Any] | str | list[str],
+        use_chat_api: bool,
+        verbose: bool,
+    ) -> str | dict[str, Any]:
+        kwargs = self._prepare_kwargs(prompt, schema, use_chat_api, verbose)
+
+        if use_chat_api:
+            response = self.client.chat.completions.create(**kwargs)
+            content = response.choices[0].message.content
+        else:
+            response = self.client.completions.create(**kwargs)
+            content = response.choices[0].text
+
         if verbose:
             print(f"Response: ```\n{response}\n```")
 
-        content = response.choices[0].text
         if isinstance(schema, dict):
             return json.loads(content)
         return content
@@ -267,7 +272,7 @@ class OpenAICompatLLM(LLM):
             try:
                 if self._use_chat_api is None:
                     try:
-                        self._generate_chat(prompt, schema, verbose)
+                        self._generate(prompt, schema, use_chat_api=True, verbose=verbose)
                         self._use_chat_api = True
                     except BadRequestError as e:
                         if "chat template" in str(e).lower():
@@ -277,11 +282,7 @@ class OpenAICompatLLM(LLM):
                             raise
 
                 assert self._use_chat_api is not None
-                
-                if self._use_chat_api:
-                    content = self._generate_chat(prompt, schema, verbose)
-                else:
-                    content = self._generate_completion(prompt, schema, verbose)
+                content = self._generate(prompt, schema, use_chat_api=self._use_chat_api, verbose=verbose)
 
                 if schema is not None:
                     _check_schema(content, schema)
