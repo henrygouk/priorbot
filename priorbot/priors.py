@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import asyncio
 from collections.abc import Callable
+from copy import deepcopy
 import json
 import numpy as np
 from typing import Any, Coroutine, cast
@@ -246,29 +247,26 @@ class AsyncPrior(Prior, ABC):
         pass
 
 
+def default_llm_template(schema: dict[str, Any], observed: dict[str, Any] | None = None) -> str:
+    if observed:
+        return (
+            f"Given the observed features with these values: {json.dumps(observed)}, "
+            f"generate a data point that conforms to the following schema: {json.dumps(schema)}"
+        )
+    else:
+        return f"Generate a data point that conforms to the following schema: {json.dumps(schema)}"
+
+
 class LLMPrior(AsyncPrior):
     def __init__(
         self,
         llm: LLM,
-        template: Callable[[dict[str, Any]], str] | None = None,
-        template_conditional: Callable[[dict[str, Any], dict[str, Any]], str] | None = None,
+        template: Callable[[dict[str, Any], dict[str, Any] | None], str] = default_llm_template,
         manual_reasoning: bool = False,
         shuffle_variables: bool = True,
     ):
         self.llm = llm
-
-        def _default_llm_template(schema: dict[str, Any]) -> str:
-            return f"Generate a data point that conforms to the following schema: {json.dumps(schema)}"
-
-        def _default_llm_template_conditional(observed: dict[str, Any], schema: dict[str, Any]) -> str:
-            return (
-                f"Given the observed features with these values: {json.dumps(observed)}, "
-                f"generate a data point that conforms to the following schema: {json.dumps(schema)}"
-            )
-
-        self.template = template or _default_llm_template
-        self.template_conditional = template_conditional or _default_llm_template_conditional
-
+        self.template = template
         self.manual_reasoning = manual_reasoning
         self.shuffle_variables = shuffle_variables
 
@@ -290,14 +288,28 @@ class LLMPrior(AsyncPrior):
                 np.random.shuffle(keys)
                 schema["properties"] = {k: schema["properties"][k] for k in keys}
 
-            if observed is None:
-                prompt = self.template(schema)
-            else:
-                prompt = self.template_conditional(observed, schema)
+            prompt = self.template(schema, observed)
 
-            sample = self.llm.generate(prompt, schema, verbose)
+            if self.manual_reasoning:
+                gen_schema = deepcopy(schema)
+                gen_schema["properties"] = {
+                    "reasoning": {
+                        "type": "string",
+                        "description": (
+                            "A step by step explanation of the reasoning behind the sampling process. "
+                            "This should be the first field in the JSON object."
+                        ),
+                    },
+                    **gen_schema["properties"],
+                }
+                gen_schema["required"] = ["reasoning"] + gen_schema["required"]
+            else:
+                gen_schema = schema
+
+            sample = self.llm.generate(prompt, gen_schema, verbose)
 
             if isinstance(sample, dict):
+                sample.pop("reasoning", None)
                 samples.append(sample)
             else:  # String should not be given as output (see .generate methods in llm.py)
                 raise ValueError(f"LLM returned invalid output {sample}.")
@@ -306,10 +318,19 @@ class LLMPrior(AsyncPrior):
 
 
 class GibbsLLMPrior(AsyncPrior):
-    def __init__(self, base_prior: Prior, burn_in: int, thinning: int):
-        self.base_prior = base_prior
+    def __init__(
+        self,
+        llm_prior: LLMPrior,
+        burn_in: int,
+        thinning: int,
+        block_size: int = 1,
+        sweep: bool = False,
+    ):
+        self.llm_prior = llm_prior
         self.burn_in = burn_in
         self.thinning = thinning
+        self.block_size = block_size
+        self.sweep = sweep
 
     def _sample_impl(
         self,
@@ -319,36 +340,45 @@ class GibbsLLMPrior(AsyncPrior):
         verbose: bool = False,
         pbar: int | None = None,
     ) -> list[dict[str, Any]]:
-        samples = self.base_prior.sample(1, schema, verbose, False)
+        samples = self.llm_prior.sample(1, schema, verbose, False)
 
         chain_length = self.burn_in + n_samples * self.thinning
+        keys_pool = []
         for _ in tqdm(
             range(chain_length), disable=pbar is None, position=pbar, desc=f"Chain {pbar}", dynamic_ncols=True
         ):
             itr_observed = samples[-1].copy()
             keys = list(itr_observed.keys())
             np.random.shuffle(keys)
-            itr_observed = {k: itr_observed[k] for k in keys[:-1]}
-            key_to_discard = keys[-1]
+            itr_observed = {k: itr_observed[k] for k in keys}
+
+            if not self.sweep:
+                keys_to_discard = keys[-self.block_size:]
+            else:
+                if len(keys_pool) < self.block_size:
+                    keys_pool = keys_pool + keys
+
+                keys_to_discard = keys_pool[:self.block_size]
+                keys_pool = keys_pool[self.block_size:]
+
+            itr_observed = {k: itr_observed[k] for k in itr_observed if k not in keys_to_discard}
 
             itr_schema = {
                 "type": "object",
-                "properties": {
-                    key_to_discard: schema["properties"][key_to_discard]
-                },
-                "required": [key_to_discard]
+                "properties": {key: schema["properties"][key] for key in keys_to_discard},
+                "required": keys_to_discard
             }
 
             all_observed = {**itr_observed, **(observed or {})}
-            new_marginal = self.base_prior.sample_conditional(1, itr_schema, all_observed, verbose)[0]
+            new_marginal = self.llm_prior.sample_conditional(1, itr_schema, all_observed, verbose)[0]
             new_sample = itr_observed | new_marginal
             samples.append(new_sample)
 
             if verbose:
-                print(f"Generated {len(samples[self.burn_in::self.thinning][:n_samples])}/{n_samples} samples.")
+                print(f"Generated {len(samples[self.burn_in + 1::self.thinning][:n_samples])}/{n_samples} samples.")
                 print(f"Current sample: {samples[-1]}")
 
-        thinned_samples = samples[self.burn_in::self.thinning][:n_samples]
+        thinned_samples = samples[self.burn_in + 1::self.thinning][:n_samples]  # + 1 to skip the initial sample
         return thinned_samples
 
 
@@ -515,7 +545,7 @@ class MCMCLLMPrior(AsyncPrior):
         pass
 
 
-def barker_prompt_template(
+def default_barker_template(
     option1: dict[str, Any],
     option2: dict[str, Any],
     input_schema: dict[str, Any],
@@ -536,10 +566,11 @@ class BarkerLLMPrior(MCMCLLMPrior):
         burn_in: int = 10,
         thinning: int = 1,
         manual_reasoning: bool = False,
-        prompt_template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = barker_prompt_template,
+        max_trials: int = 10,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
     ):
-        super().__init__(llm, burn_in, thinning, manual_reasoning)
-        self.prompt_template = prompt_template
+        super().__init__(llm, burn_in, thinning, manual_reasoning, max_trials)
+        self.template = template
 
     def _acceptance(
         self,
@@ -565,13 +596,13 @@ class BarkerLLMPrior(MCMCLLMPrior):
                 "description": "A step by step explanation of the reasoning behind the decision. This should be the first field in the JSON object."
             }
 
-        input_str = self.prompt_template(option1, option2, schema, binary_schema, observed)
+        input_str = self.template(option1, option2, schema, binary_schema, observed)
         output = self.llm.generate(input_str, binary_schema, verbose=verbose)
 
         return type(output) is dict and output.get("choice") == "Option 1"
 
 
-def gambling_prompt_template(
+def default_gambling_template(
     option1: dict[str, Any],
     option2: dict[str, Any],
     input_schema: dict[str, Any],
@@ -603,10 +634,11 @@ class GamblingLLMPrior(MCMCLLMPrior):
         burn_in: int = 10,
         thinning: int = 1,
         manual_reasoning: bool = False,
-        prompt_template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = gambling_prompt_template,
+        max_trials: int = 10,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
     ):
-        super().__init__(llm, burn_in, thinning, manual_reasoning)
-        self.prompt_template = prompt_template
+        super().__init__(llm, burn_in, thinning, manual_reasoning, max_trials)
+        self.template = template
 
     def _acceptance(
         self,
@@ -637,9 +669,7 @@ class GamblingLLMPrior(MCMCLLMPrior):
 
         bet_value = np.round(np.random.rand() * 100, 2)
 
-        input_str = self.prompt_template(
-            option1, option2, schema, binary_schema, bet_value, observed
-        )
+        input_str = self.template(option1, option2, schema, binary_schema, bet_value, observed)
         output = self.llm.generate(input_str, binary_schema, verbose=verbose)
 
         return type(output) is dict and output.get("bet") == "Place Bet"
