@@ -405,6 +405,105 @@ class MCMCLLMPrior(AsyncPrior):
         self.manual_reasoning = manual_reasoning
         self.max_trials = max_trials
 
+    @staticmethod
+    def _sample_single(
+        proposal: Prior,
+        schema: dict[str, Any],
+        observed: dict[str, Any] | None = None,
+        verbose: bool = False,
+    ) -> dict[str, Any]:
+        if observed is None:
+            return proposal.sample(1, schema, verbose)[0]
+        else:
+            return proposal.sample_conditional(1, schema, observed, verbose)[0]
+
+    def split_schema(self, schema: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        discrete_keys = [
+            key for key, value in schema["properties"].items()
+            if value["type"] == "string"
+        ]
+        continuous_keys = [
+            key for key, value in schema["properties"].items()
+            if value["type"] in ("number", "integer")
+        ]
+        discrete_schema = {
+            "type": "object",
+            "properties": {key: schema["properties"][key] for key in discrete_keys},
+            "required": discrete_keys,
+        }
+        continuous_schema = {
+            "type": "object",
+            "properties": {key: schema["properties"][key] for key in continuous_keys},
+            "required": continuous_keys,
+        }
+        return discrete_schema, continuous_schema
+
+    def _initialize_proposal_chain(
+        self,
+        schema: dict[str, Any],
+        observed: dict[str, Any] | None = None,
+        verbose: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Draw an initial sample for an MCMC chain whose proposals are decomposed into
+        independent discrete (string) and continuous (number/integer) parts.
+
+        The schema is split by feature type, ``llm`` is asked to estimate population
+        minima/maxima for any continuous features missing them, and the supplied
+        proposal distributions are then sampled (conditional on ``observed`` when
+        provided). Returns ``(initial_sample, discrete_schema, continuous_schema)``;
+        the returned sub-schemas have any LLM-estimated bounds populated, ready for
+        reuse by later proposals in the chain. ``schema`` is not mutated.
+        """
+        discrete_schema, continuous_schema = self.split_schema(schema)
+        needs_bounds = continuous_schema["properties"] and any(
+            "minimum" not in value or "maximum" not in value
+            for value in continuous_schema["properties"].values()
+        )
+        if needs_bounds:
+            bounds_prompt = (
+                f"Given the following schema: {json.dumps(continuous_schema)} provide "
+                "reasonable estimates for the population minimum and maximum values for "
+                "the continuous features. Respond in JSON in the following format: "
+                "{'feature_name': {'min': min_value, 'max': max_value}} where "
+                "feature_name is the name of the continuous feature, and min_value and "
+                "max_value are your estimates for the population minimum and maximum "
+                "values for that feature, assuming no outliers."
+            )
+            bounds_schema = {
+                "type": "object",
+                "properties": {
+                    key: {
+                        "type": "object",
+                        "properties": {
+                            "min": {"type": continuous_schema["properties"][key]["type"]},
+                            "max": {"type": continuous_schema["properties"][key]["type"]},
+                        },
+                        "required": ["min", "max"],
+                    }
+                    for key in continuous_schema["properties"].keys()
+                },
+            }
+            bounds = cast(
+                dict[str, Any],
+                self.llm.generate(bounds_prompt, schema=bounds_schema, verbose=verbose),
+            )
+
+            continuous_schema = deepcopy(continuous_schema)
+            for key, value in bounds.items():
+                if key in continuous_schema["properties"]:
+                    continuous_schema["properties"][key]["minimum"] = value["min"]
+                    continuous_schema["properties"][key]["maximum"] = value["max"]
+
+        disc = (
+            self._sample_single(self.discrete_proposal_dist, discrete_schema, observed, verbose)
+            if discrete_schema["properties"] else {}
+        )
+        cont = (
+            self._sample_single(self.continuous_proposal_dist, continuous_schema, observed, verbose)
+            if continuous_schema["properties"] else {}
+        )
+        return {**disc, **cont}, discrete_schema, continuous_schema
+
     def _sample_impl(
         self,
         n_samples: int,
@@ -413,72 +512,13 @@ class MCMCLLMPrior(AsyncPrior):
         verbose: bool = False,
         pbar: int | None = None,
     ) -> list[dict[str, Any]]:
+        initial_sample, discrete_schema, continuous_schema = self._initialize_proposal_chain(
+            schema, observed, verbose
+        )
+        has_discrete_features = bool(discrete_schema["properties"])
+        has_continuous_features = bool(continuous_schema["properties"])
 
-        def _sample_single(proposal: Prior, s: dict[str, Any], o: dict[str, Any] | None = None) -> dict[str, Any]:
-            if o is None:
-                return proposal.sample(1, s, verbose)[0]
-            else:
-                return proposal.sample_conditional(1, s, o, verbose)[0]
-
-        discrete_schema = {
-            "type": "object",
-            "properties": {key: value for key, value in schema["properties"].items() if value["type"] == "string"},
-            "required": [key for key, value in schema["properties"].items() if value["type"] == "string"]
-        }
-
-        continuous_schema = {
-            "type": "object",
-            "properties": {key: value for key, value in schema["properties"].items() if value["type"] == "number" or value["type"] == "integer"},
-            "required": [key for key, value in schema["properties"].items() if value["type"] == "number" or value["type"] == "integer"]
-        }
-
-        has_discrete_features = any(value["type"] == "string" for value in schema["properties"].values())
-        has_continuous_features = any(value["type"] == "number" or value["type"] == "integer" for value in schema["properties"].values())
-
-        disc = {}
-        if has_discrete_features:
-            disc = _sample_single(self.discrete_proposal_dist, discrete_schema, observed)
-
-        if has_continuous_features and any(("minimum" not in value or "maximum" not in value) for value in schema["properties"].values()):
-            # means_prompt = f"Given the following schema: {json.dumps(schema)} provide a reasonable estimate for the population means for the " \
-            #     f"continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
-            #
-            # stds_prompt = f"Given the following schema: {json.dumps(schema)} provide a reaonsable estimate for the population standard deviations " \
-            #     f"for the continuous features. Respond in JSON in the format {json.dumps(continuous_schema)}."
-            #
-            # means = self.llm.generate(means_prompt, schema=continuous_schema, verbose=verbose)
-            # stds = self.llm.generate(stds_prompt, schema=continuous_schema, verbose=verbose)
-            # Get reasonable upper and lower bounds for the integer and number fields and use these to instantiate uniform priors
-            bounds_prompt = f"Given the following schema: {json.dumps(continuous_schema)} provide reasonable estimates for the population minimum and maximum values for the continuous features. Respond in JSON in the following format: {{'feature_name': {{'min': min_value, 'max': max_value}}}} where feature_name is the name of the continuous feature, and min_value and max_value are your estimates for the population minimum and maximum values for that feature, assuming no outliers."
-
-            bounds = self.llm.generate(bounds_prompt, schema={
-                    "type": "object",
-                    "properties": {
-                        key: {
-                            "type": "object",
-                            "properties": {
-                                "min": {"type": continuous_schema["properties"][key]["type"]},
-                                "max": {"type": continuous_schema["properties"][key]["type"]}
-                            },
-                            "required": ["min", "max"]
-                        } for key in continuous_schema["properties"].keys()
-                    }
-                },
-                verbose=verbose
-            )
-            bounds = cast(dict[str, Any], bounds)
-
-            # Put these mins and maxes back into the schema
-            for key, value in bounds.items():
-                if key in continuous_schema["properties"]:
-                    continuous_schema["properties"][key]["minimum"] = value["min"]
-                    continuous_schema["properties"][key]["maximum"] = value["max"]
-
-        cont = {}
-        if has_continuous_features:
-            cont = _sample_single(self.continuous_proposal_dist, continuous_schema, observed)
-
-        samples = [{**disc, **cont}]
+        samples = [initial_sample]
 
         chain_length = self.burn_in + n_samples * self.thinning
         for _ in tqdm(
@@ -488,19 +528,15 @@ class MCMCLLMPrior(AsyncPrior):
             for _ in range(self.max_trials):  # Try up to max_trials times to generate a valid candidate
                 candidate_discrete = {}
                 if has_discrete_features:
-                    candidate_discrete = _sample_single(self.discrete_proposal_dist, discrete_schema, observed)
+                    candidate_discrete = self._sample_single(
+                        self.discrete_proposal_dist, discrete_schema, observed, verbose
+                    )
 
                 candidate_continuous = {}
                 if has_continuous_features:
-                    candidate_continuous = _sample_single(self.continuous_proposal_dist, continuous_schema, observed)
-
-                # for k in candidate_continuous.keys():
-                #     candidate_continuous[k] = candidate_continuous[k] * stds[k] + samples[-1][k]
-                #
-                #     if continuous_schema["properties"][k].get("type") == "integer":
-                #         candidate_continuous[k] = np.round(candidate_continuous[k]).item()
-                #     else:
-                #         candidate_continuous[k] = np.round(candidate_continuous[k], 2).item()
+                    candidate_continuous = self._sample_single(
+                        self.continuous_proposal_dist, continuous_schema, observed, verbose
+                    )
 
                 candidate = {**candidate_discrete, **candidate_continuous}
 
@@ -528,9 +564,9 @@ class MCMCLLMPrior(AsyncPrior):
                 raise e
 
             if verbose:
-                print(f"Generated {len(samples[self.burn_in::self.thinning][:n_samples])}/{n_samples} samples.")
+                print(f"Generated {len(samples[self.burn_in + 1::self.thinning][:n_samples])}/{n_samples} samples.")
 
-        thinned_samples = samples[self.burn_in::self.thinning][:n_samples]
+        thinned_samples = samples[self.burn_in + 1::self.thinning][:n_samples]  # Drop the initial sample
         return thinned_samples
 
     @abstractmethod
@@ -587,14 +623,19 @@ class BarkerLLMPrior(MCMCLLMPrior):
                     "type": "string",
                     "enum": ["Option 1", "Option 2"]
                 }
-            }
+            },
+            "required": ["choice"]
         }
 
         if self.manual_reasoning:
-            binary_schema["properties"]["reasoning"] = {
-                "type": "string",
-                "description": "A step by step explanation of the reasoning behind the decision. This should be the first field in the JSON object."
+            binary_schema["properties"] = {
+                "reasoning": {
+                    "type": "string",
+                    "description": "A step by step explanation of the reasoning behind the decision. This should be the first field in the JSON object."
+                },
+                **binary_schema["properties"],
             }
+            binary_schema["required"] = ["reasoning"] + binary_schema["required"]
 
         input_str = self.template(option1, option2, schema, binary_schema, observed)
         output = self.llm.generate(input_str, binary_schema, verbose=verbose)
@@ -658,14 +699,19 @@ class GamblingLLMPrior(MCMCLLMPrior):
                     "type": "string",
                     "enum": ["Place Bet", "Do Not Place Bet"]
                 }
-            }
+            },
+            "required": ["bet"]
         }
 
         if self.manual_reasoning:
-            binary_schema["properties"]["reasoning"] = {
-                "type": "string",
-                "description": "A step by step explanation of the reasoning behind the decision to place a bet or not. This should be the first field in the JSON object."
+            binary_schema["properties"] = {
+                "reasoning": {
+                    "type": "string",
+                    "description": "A step by step explanation of the reasoning behind the decision to place a bet or not. This should be the first field in the JSON object."
+                },
+                **binary_schema["properties"],
             }
+            binary_schema["required"] = ["reasoning"] + binary_schema["required"]
 
         bet_value = np.round(np.random.rand() * 100, 2)
 
@@ -673,6 +719,172 @@ class GamblingLLMPrior(MCMCLLMPrior):
         output = self.llm.generate(input_str, binary_schema, verbose=verbose)
 
         return type(output) is dict and output.get("bet") == "Place Bet"
+
+
+class MetropolisWithinGibbsLLMPrior(MCMCLLMPrior):
+    def __init__(
+        self,
+        llm: LLM,
+        burn_in: int,
+        thinning: int,
+        block_size: int = 1,
+        sweep: bool = False,
+        manual_reasoning: bool = False,
+        max_trials: int = 10,
+    ):
+        super().__init__(llm, burn_in, thinning, manual_reasoning, max_trials)
+        self.block_size = block_size
+        self.sweep = sweep
+
+    def _sample_impl(
+        self,
+        n_samples: int,
+        schema: dict[str, Any],
+        observed: dict[str, Any] | None = None,
+        verbose: bool = False,
+        pbar: int | None = None,
+    ) -> list[dict[str, Any]]:
+        initial_sample, _, _ = self._initialize_proposal_chain(schema, observed, verbose)
+        samples = [initial_sample]
+
+        chain_length = self.burn_in + n_samples * self.thinning
+        keys_pool = []
+        for _ in tqdm(
+            range(chain_length), disable=pbar is None, position=pbar, desc=f"Chain {pbar}", dynamic_ncols=True
+        ):
+            itr_observed = samples[-1].copy()
+            keys = list(itr_observed.keys())
+            np.random.shuffle(keys)
+            itr_observed = {k: itr_observed[k] for k in keys}
+
+            if not self.sweep:
+                keys_to_discard = keys[-self.block_size:]
+            else:
+                if len(keys_pool) < self.block_size:
+                    keys_pool = keys_pool + keys
+
+                keys_to_discard = keys_pool[:self.block_size]
+                keys_pool = keys_pool[self.block_size:]
+
+            itr_discard = {k: itr_observed[k] for k in keys_to_discard}
+            itr_observed = {k: itr_observed[k] for k in itr_observed if k not in keys_to_discard}
+
+            itr_schema = {
+                "type": "object",
+                "properties": {
+                    key: schema["properties"][key] for key in keys_to_discard
+                },
+                "required": keys_to_discard
+            }
+
+            all_observed = {**itr_observed, **(observed or {})}
+
+            itr_discrete_schema, itr_continuous_schema = self.split_schema(itr_schema)
+            has_discrete_features = bool(itr_discrete_schema["properties"])
+            has_continuous_features = bool(itr_continuous_schema["properties"])
+
+            candidate = {}  # Prevent PossiblyUnboundVariable error from type checkers
+            for _ in range(self.max_trials):  # Try up to max_trials times to generate a valid candidate
+                candidate_discrete = {}
+                if has_discrete_features:
+                    candidate_discrete = self._sample_single(
+                        self.discrete_proposal_dist, itr_discrete_schema, all_observed, verbose
+                    )
+
+                candidate_continuous = {}
+                if has_continuous_features:
+                    candidate_continuous = self._sample_single(
+                        self.continuous_proposal_dist, itr_continuous_schema, all_observed, verbose
+                    )
+
+                candidate = {**candidate_discrete, **candidate_continuous}
+
+                # If the candidate is the same as the previous sample, try again
+                if all(itr_discard[k] == candidate[k] for k in candidate.keys()):
+                    continue
+                break
+
+            if np.random.choice([True, False]):
+                options = [itr_discard, candidate]
+            else:
+                options = [candidate, itr_discard]
+
+            try:
+                if verbose:
+                    print(f"Current sample: {itr_discard}, Candidate: {candidate}")
+
+                if self._acceptance(options[0], options[1], itr_schema, all_observed, verbose=verbose):
+                    new_sample = itr_observed | options[0]
+                else:
+                    new_sample = itr_observed | options[1]
+                samples.append(new_sample)
+            except Exception as e:
+                if verbose:
+                    print(f"Error during acceptance step: {e}. Rejecting candidate.")
+                raise e
+
+            if verbose:
+                print(f"Generated {len(samples[self.burn_in + 1::self.thinning][:n_samples])}/{n_samples} samples.")
+                print(f"Current sample: {samples[-1]}")
+
+        thinned_samples = samples[self.burn_in + 1::self.thinning][:n_samples]  # Skip the initial sample
+        return thinned_samples
+
+
+class BarkerGibbsLLMPrior(MetropolisWithinGibbsLLMPrior, BarkerLLMPrior):
+    """
+    Block-Gibbs LLM prior whose per-block Metropolis update uses Barker-style LLM
+    acceptance: at each step, the chain proposes a new block of variables from the
+    proposal distributions and asks the LLM to pick the more plausible of the two
+    options (current vs candidate).
+
+    We reuse the `_sample_impl` from `MetropolisWithinGibbsLLMPrior` and the
+    `_acceptance` from `BarkerLLMPrior` by python's multiple inheritance with MRO.
+    """
+
+    def __init__(
+        self,
+        llm: LLM,
+        burn_in: int = 10,
+        thinning: int = 1,
+        block_size: int = 1,
+        sweep: bool = False,
+        manual_reasoning: bool = False,
+        max_trials: int = 10,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
+    ):
+        super().__init__(
+            llm, burn_in, thinning, block_size, sweep, manual_reasoning, max_trials,
+        )
+        self.template = template
+
+
+class GamblingGibbsLLMPrior(MetropolisWithinGibbsLLMPrior, GamblingLLMPrior):
+    """
+    Block-Gibbs LLM prior whose per-block Metropolis update uses gambling-style LLM
+    acceptance: at each step, the chain proposes a new block of variables and asks
+    the LLM whether to take a randomly-sized bet that the candidate is the real
+    data point.
+
+    We reuse the `_sample_impl` from `MetropolisWithinGibbsLLMPrior` and the
+    `_acceptance` from `GamblingLLMPrior` by python's multiple inheritance with MRO.
+    """
+
+    def __init__(
+        self,
+        llm: LLM,
+        burn_in: int = 10,
+        thinning: int = 1,
+        block_size: int = 1,
+        sweep: bool = False,
+        manual_reasoning: bool = False,
+        max_trials: int = 10,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
+    ):
+        super().__init__(
+            llm, burn_in, thinning, block_size, sweep, manual_reasoning, max_trials,
+        )
+        self.template = template
 
 
 class SplitJointConditionalPrior(Prior):
