@@ -287,6 +287,7 @@ class LLMPrior(AsyncPrior):
                 keys = list(schema["properties"].keys())
                 np.random.shuffle(keys)
                 schema["properties"] = {k: schema["properties"][k] for k in keys}
+                schema["required"] = keys
 
             prompt = self.template(schema, observed)
 
@@ -325,6 +326,7 @@ class GibbsLLMPrior(AsyncPrior):
         thinning: int,
         block_size: int = 1,
         sweep: bool = False,
+        shuffle_variables: bool = True,
     ):
         self.llm_prior = llm_prior
         # We shuffle variables in the Gibbs procedure, no need to shuffle them during sampling
@@ -333,6 +335,9 @@ class GibbsLLMPrior(AsyncPrior):
         self.thinning = thinning
         self.block_size = block_size
         self.sweep = sweep
+        self.shuffle_variables = shuffle_variables
+        if not (self.shuffle_variables or self.sweep):
+            raise ValueError("Either shuffle_variables or sweep must be True.")
 
     def _sample_impl(
         self,
@@ -351,8 +356,8 @@ class GibbsLLMPrior(AsyncPrior):
         ):
             itr_observed = samples[-1].copy()
             keys = list(itr_observed.keys())
-            np.random.shuffle(keys)
-            itr_observed = {k: itr_observed[k] for k in keys}
+            if self.shuffle_variables:
+                np.random.shuffle(keys)
 
             if not self.sweep:
                 keys_to_discard = keys[-self.block_size:]
@@ -363,7 +368,7 @@ class GibbsLLMPrior(AsyncPrior):
                 keys_to_discard = keys_pool[:self.block_size]
                 keys_pool = keys_pool[self.block_size:]
 
-            itr_observed = {k: itr_observed[k] for k in itr_observed if k not in keys_to_discard}
+            itr_observed = {k: itr_observed[k] for k in keys if k not in keys_to_discard}
 
             itr_schema = {
                 "type": "object",
@@ -396,6 +401,7 @@ class MCMCLLMPrior(AsyncPrior):
         llm: LLM,
         burn_in: int,
         thinning: int,
+        shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
     ):
@@ -404,6 +410,7 @@ class MCMCLLMPrior(AsyncPrior):
         self.continuous_proposal_dist = UniformPrior()
         self.burn_in = burn_in
         self.thinning = thinning
+        self.shuffle_variables = shuffle_variables
         self.manual_reasoning = manual_reasoning
         self.max_trials = max_trials
 
@@ -547,14 +554,22 @@ class MCMCLLMPrior(AsyncPrior):
                     continue
                 break
 
-            if np.random.choice([True, False]):
-                options = [samples[-1], candidate]
+            if self.shuffle_variables:
+                keys = list(candidate.keys())
+                np.random.shuffle(keys)
+                current = {k: samples[-1][k] for k in keys}
+                candidate = {k: candidate[k] for k in keys}
             else:
-                options = [candidate, samples[-1]]
+                current = samples[-1]
+
+            if np.random.choice([True, False]):
+                options = [current, candidate]
+            else:
+                options = [candidate, current]
 
             try:
                 if verbose:
-                    print(f"Current sample: {samples[-1]}, Candidate: {candidate}")
+                    print(f"Current sample: {current}, Candidate: {candidate}")
 
                 if self._acceptance(options[0], options[1], schema, observed, verbose=verbose):
                     samples.append(options[0])
@@ -602,11 +617,12 @@ class BarkerLLMPrior(MCMCLLMPrior):
         llm: LLM,
         burn_in: int = 10,
         thinning: int = 1,
+        shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
         template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
     ):
-        super().__init__(llm, burn_in, thinning, manual_reasoning, max_trials)
+        super().__init__(llm, burn_in, thinning, shuffle_variables, manual_reasoning, max_trials)
         self.template = template
 
     def _acceptance(
@@ -675,11 +691,12 @@ class GamblingLLMPrior(MCMCLLMPrior):
         llm: LLM,
         burn_in: int = 10,
         thinning: int = 1,
+        shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
         template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
     ):
-        super().__init__(llm, burn_in, thinning, manual_reasoning, max_trials)
+        super().__init__(llm, burn_in, thinning, shuffle_variables, manual_reasoning, max_trials)
         self.template = template
 
     def _acceptance(
@@ -730,12 +747,15 @@ class MetropolisWithinGibbsLLMPrior(MCMCLLMPrior):
         thinning: int,
         block_size: int = 1,
         sweep: bool = False,
+        shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
     ):
-        super().__init__(llm, burn_in, thinning, manual_reasoning, max_trials)
+        super().__init__(llm, burn_in, thinning, shuffle_variables, manual_reasoning, max_trials)
         self.block_size = block_size
         self.sweep = sweep
+        if not (self.shuffle_variables or self.sweep):
+            raise ValueError("Either shuffle_variables or sweep must be True.")
 
     def _sample_impl(
         self,
@@ -755,8 +775,8 @@ class MetropolisWithinGibbsLLMPrior(MCMCLLMPrior):
         ):
             itr_observed = samples[-1].copy()
             keys = list(itr_observed.keys())
-            np.random.shuffle(keys)
-            itr_observed = {k: itr_observed[k] for k in keys}
+            if self.shuffle_variables:
+                np.random.shuffle(keys)
 
             if not self.sweep:
                 keys_to_discard = keys[-self.block_size:]
@@ -850,12 +870,13 @@ class BarkerGibbsLLMPrior(MetropolisWithinGibbsLLMPrior, BarkerLLMPrior):
         thinning: int = 1,
         block_size: int = 1,
         sweep: bool = False,
+        shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
         template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
     ):
         super().__init__(
-            llm, burn_in, thinning, block_size, sweep, manual_reasoning, max_trials,
+            llm, burn_in, thinning, block_size, sweep, shuffle_variables, manual_reasoning, max_trials,
         )
         self.template = template
 
@@ -878,12 +899,13 @@ class GamblingGibbsLLMPrior(MetropolisWithinGibbsLLMPrior, GamblingLLMPrior):
         thinning: int = 1,
         block_size: int = 1,
         sweep: bool = False,
+        shuffle_variables: bool = True,
         manual_reasoning: bool = False,
         max_trials: int = 10,
         template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
     ):
         super().__init__(
-            llm, burn_in, thinning, block_size, sweep, manual_reasoning, max_trials,
+            llm, burn_in, thinning, block_size, sweep, shuffle_variables, manual_reasoning, max_trials,
         )
         self.template = template
 

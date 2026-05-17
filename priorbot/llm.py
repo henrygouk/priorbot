@@ -270,9 +270,10 @@ class OpenAICompatLLM(LLM):
 
         for _ in range(max_trials):
             try:
+                content = None
                 if self._use_chat_api is None:
                     try:
-                        self._generate(prompt, schema, use_chat_api=True, verbose=verbose)
+                        content = self._generate(prompt, schema, use_chat_api=True, verbose=verbose)
                         self._use_chat_api = True
                     except BadRequestError as e:
                         if "chat template" in str(e).lower():
@@ -282,7 +283,8 @@ class OpenAICompatLLM(LLM):
                             raise
 
                 assert self._use_chat_api is not None
-                content = self._generate(prompt, schema, use_chat_api=self._use_chat_api, verbose=verbose)
+                if content is None:
+                    content = self._generate(prompt, schema, use_chat_api=self._use_chat_api, verbose=verbose)
 
                 if schema is not None:
                     _check_schema(content, schema)
