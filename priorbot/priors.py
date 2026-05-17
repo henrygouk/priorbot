@@ -584,13 +584,12 @@ class MCMCLLMPrior(AsyncPrior):
 def default_barker_template(
     option1: dict[str, Any],
     option2: dict[str, Any],
-    input_schema: dict[str, Any],
+    input_schema: dict[str, Any],  # FIXME: should we use this in the prompt, or remove it?
     output_schema: dict[str, Any],
     observed: dict[str, Any] | None = None,
 ) -> str:
     if observed:
-        # FIXME: the `input_schema` is not aligned with `observed`
-        return f"Given the observed features with these values: {json.dumps(observed)}, and the following schema: {json.dumps(input_schema)}, which of the following two options is more likely to be a valid data point? Option 1: {json.dumps(option1)}. Option 2: {json.dumps(option2)}. Respond in the format specified by this schema: {json.dumps(output_schema)}."
+        return f"Given the observed features with these values: {json.dumps(observed)}, which of the following two options is more likely to be a valid data point? Option 1: {json.dumps(option1)}. Option 2: {json.dumps(option2)}. Respond in the format specified by this schema: {json.dumps(output_schema)}."
     else:
         return f"Which of the following two options is more likely? Option 1: {json.dumps(option1)}. Option 2: {json.dumps(option2)}. Respond in the format specified by this schema: {json.dumps(output_schema)}."
 
@@ -646,7 +645,7 @@ class BarkerLLMPrior(MCMCLLMPrior):
 def default_gambling_template(
     option1: dict[str, Any],
     option2: dict[str, Any],
-    input_schema: dict[str, Any],
+    input_schema: dict[str, Any],  # FIXME: should we use this in the prompt, or remove it?
     output_schema: dict[str, Any],
     bet_value: float,
     observed: dict[str, Any] | None = None,
@@ -654,7 +653,7 @@ def default_gambling_template(
     if observed:
         return (
             "You will be presented with two sets of feature values for a data point, along with some observed "
-            f"features with these values: {json.dumps(observed)}, and the following schema: {json.dumps(input_schema)}. One of these is real and the other is fake. You have the opportunity"
+            f"features with these values: {json.dumps(observed)}. One of these is real and the other is fake. You have the opportunity"
             f" to place a bet of ${bet_value} that Option 1 is more plausible, which will pay out $100 if you are "
             f"correct. Your aim is to maximise profit. Option 1 is {json.dumps(option1)} and Option 2 is {json.dumps(option2)}. Respond with"
             f" JSON that conforms to this schema: {json.dumps(output_schema)}."
