@@ -327,6 +327,8 @@ class GibbsLLMPrior(AsyncPrior):
         sweep: bool = False,
     ):
         self.llm_prior = llm_prior
+        # We shuffle variables in the Gibbs procedure, no need to shuffle them during sampling
+        self.llm_prior.shuffle_variables = False
         self.burn_in = burn_in
         self.thinning = thinning
         self.block_size = block_size
