@@ -1,12 +1,72 @@
 from abc import abstractmethod
 from typing import Any
+import copy
 import json
+import re
 
 
-def _check_schema(data: dict[str, Any], schema: dict[str, Any]) -> None:
+def _strip_xgrammar_buggy_number_bounds(schema: Any) -> Any:
+    """Workaround for an xgrammar bug in ``GenerateFloatRangeRegex``.
+
+    When a JSON-schema number/integer has both ``minimum`` and ``maximum`` set
+    and the closed range ``[minimum, maximum]`` overlaps the open interval
+    ``(-1, 0)``, xgrammar generates a regex whose negative branch starts at
+    ``-[1-9]`` and therefore excludes all ``-0.X`` values. We work around this
+    by returning a deep copy of ``schema`` with those bounds removed from any
+    affected numeric subschema. The original (bounded) schema is still used
+    client-side by ``_check_json_schema`` to reject out-of-range samples.
+    """
+
+    def _overlaps_neg_unit(lo: Any, hi: Any) -> bool:
+        if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
+            return False
+        return lo < 0.0 and hi > -1.0
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("type") in ("number", "integer") and _overlaps_neg_unit(
+                node.get("minimum"), node.get("maximum")
+            ):
+                node.pop("minimum", None)
+                node.pop("maximum", None)
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    sanitized = copy.deepcopy(schema)
+    _walk(sanitized)
+    return sanitized
+
+
+def _check_schema(content: dict[str, Any] | str, schema: dict[str, Any] | str | list[str]) -> None:
+    # Choice
+    if isinstance(schema, list):
+        if not isinstance(content, str):
+            raise ValueError(f"Response is not a string: {content}")
+        if content not in schema:
+            raise ValueError(f"Response {content!r} is not in choice set {schema}")
+
+    # Regex
+    elif isinstance(schema, str):
+        if not isinstance(content, str):
+            raise ValueError(f"Response is not a string: {content}")
+        if not re.search(schema, content):
+            raise ValueError(f"Response {content} does not match regex schema {schema}")
+
+    # JSON
+    else:
+        if not isinstance(content, dict):  # JSON-formatted response
+            raise ValueError(f"Response is not a dictionary: {content}")
+
+        _check_json_schema(content, schema)
+
+
+def _check_json_schema(content: dict[str, Any], schema: dict[str, Any]) -> None:
     """Raise an error if the data does not satisfy the schema."""
     props = schema.get("properties", {})
-    for key, value in data.items():
+    for key, value in content.items():
         if key in props and props[key]["type"] in ["number", "integer"]:
             lo = props[key].get("minimum")
             hi = props[key].get("maximum")
@@ -20,8 +80,8 @@ def _check_schema(data: dict[str, Any], schema: dict[str, Any]) -> None:
 
     required = schema.get("required", [])
     for key in required:
-        if key not in data:
-            raise ValueError(f"Key {key} is required but not present in data {data} for schema {schema}")
+        if key not in content:
+            raise ValueError(f"Key {key} is required but not present in data {content} for schema {schema}")
 
 
 class LLM:
@@ -30,7 +90,11 @@ class LLM:
 
     @abstractmethod
     def generate(
-        self, prompt: str, schema: None | dict[str, Any] = None, verbose: bool = False
+        self,
+        prompt: str,
+        schema: None | dict[str, Any] | str | list[str] = None,
+        verbose: bool = False,
+        max_trials: int = 10,
     ) -> str | dict[str, Any]:
         pass
 
@@ -89,79 +153,114 @@ class OpenAICompatLLM(LLM):
         self.top_p = kwargs.get("top_p", 1.0)
         self._use_chat_api: bool | None = None
 
-    def _generate_chat(
-        self, prompt: str, schema: None | dict[str, Any], verbose: bool
-    ) -> str | dict[str, Any]:
-        chat = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        if verbose:
-            print(f"Chat prompt: ```\n{chat}\n```")
+    @staticmethod
+    def _structured_outputs_kwargs(
+        schema: dict[str, Any] | str | list[str], use_chat_api: bool
+    ) -> dict[str, Any]:
+        """Build the vLLM ``extra_body``/``response_format`` payload for ``schema``.
 
+        - ``list[str]``: constrain the output to one of the given strings via
+          vLLM's ``structured_outputs.choice`` (returns a raw string).
+        - ``str``: treat as a regex pattern.
+        - ``dict``: treat as a JSON schema.
+        """
+        if isinstance(schema, dict):
+            schema = _strip_xgrammar_buggy_number_bounds(schema)
+
+            if use_chat_api:
+                # JSON schema is best expressed through response_format on chat.
+                return {
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "output_schema",
+                            "schema": schema,
+                        },
+                    }
+                }
+            else:
+                return {"extra_body": {"structured_outputs": {"json": schema}}}
+
+        elif isinstance(schema, list):
+            return {"extra_body": {"structured_outputs": {"choice": schema}}}
+        elif isinstance(schema, str):
+            return {"extra_body": {"structured_outputs": {"regex": schema}}}
+        else:
+            raise ValueError(f"Invalid schema type: {type(schema)}")
+
+    def _prepare_kwargs(
+        self,
+        prompt: str,
+        schema: None | dict[str, Any] | str | list[str],
+        use_chat_api: bool,
+        verbose: bool,
+    ) -> dict[str, Any]:
         kwargs = {
             "model": self.model_name,
-            "messages": chat,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "top_p": self.top_p,
         }
 
         if schema is not None:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "output_schema",
-                    "schema": schema,
-                }
-            }
+            # For vllm >= 0.12.0; this might not work for other libraries
+            # (e.g., Ollama) or older versions of vllm.
+            kwargs.update(self._structured_outputs_kwargs(schema, use_chat_api))
 
-        response = self.client.chat.completions.create(**kwargs)
-        if verbose:
-            print(f"Response: ```\n{response}\n```")
+        if use_chat_api:
+            chat = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": prompt},
+            ]
+            if verbose:
+                print(f"Chat prompt: ```\n{chat}\n```")
+            kwargs["messages"] = chat
+        else:
+            kwargs["prompt"] = (
+                f"{(self.system_prompt + '\n') if self.system_prompt else ''}{prompt}"
+            )
+            if verbose:
+                print(f"Completion prompt: ```\n{kwargs['prompt']}\n```")
+        return kwargs
 
-        content = response.choices[0].message.content
-        if schema is not None:
-            return json.loads(content)
-        return content
-    
-    def _generate_completion(
-        self, prompt: str, schema: None | dict[str, Any], verbose: bool
+    def _generate(
+        self,
+        prompt: str,
+        schema: None | dict[str, Any] | str | list[str],
+        use_chat_api: bool,
+        verbose: bool,
     ) -> str | dict[str, Any]:
-        prompt = f"{(self.system_prompt + '\n') if self.system_prompt else ''}{prompt}"
-        if verbose:
-            print(f"Completion prompt: ```\n{prompt}\n```")
+        kwargs = self._prepare_kwargs(prompt, schema, use_chat_api, verbose)
 
-        kwargs = {
-            "model": self.model_name,
-            "prompt": prompt,
-            "max_tokens": self.max_tokens,  # openai completions default is 16
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-        }
+        if use_chat_api:
+            response = self.client.chat.completions.create(**kwargs)
+            content = response.choices[0].message.content
+        else:
+            response = self.client.completions.create(**kwargs)
+            content = response.choices[0].text
 
-        if schema is not None:
-            # For vllm >= 0.12.0; this might not work for other libraries (e.g., Ollama) or older versions of vllm
-            kwargs["extra_body"] = {"structured_outputs": {"json": schema}}
-
-        response = self.client.completions.create(**kwargs)
         if verbose:
             print(f"Response: ```\n{response}\n```")
 
-        content = response.choices[0].text
-        if schema is not None:
+        if isinstance(schema, dict):
             return json.loads(content)
         return content
 
     def generate(
-        self, prompt: str, schema: None | dict[str, Any] = None, verbose: bool = False, max_trials: int = 10
+        self,
+        prompt: str,
+        schema: None | dict[str, Any] | str | list[str] = None,
+        verbose: bool = False,
+        max_trials: int = 10,
     ) -> str | dict[str, Any]:
         """
         Generate a response from the LLM given a prompt and an optional output type. The output type is used to specify
         the expected format of the response.
 
         :param prompt: The prompt to send to the LLM (e.g. "Generate a data point that conforms to the following schema: {schema}")
-        :param schema: The expected format of the response (e.g. a JSON schema dict). If None, the response is returned as a string.
+        :param schema: The expected format of the response. ``None`` returns a free-form string. A ``dict`` is treated
+            as a JSON schema (returns a parsed dict). A ``str`` is treated as a regex pattern. A ``list[str]`` is
+            treated as a constrained "choice" set and returns one of the listed strings verbatim.
         :param verbose: Whether to print the prompt and response to the console.
         :param max_trials: The maximum number of trials to make if the response is not valid.
 
@@ -169,27 +268,25 @@ class OpenAICompatLLM(LLM):
         """
         from openai import BadRequestError
 
-        if self._use_chat_api is None:
-            try:
-                self._generate_chat(prompt, schema, verbose)
-                self._use_chat_api = True
-            except BadRequestError as e:
-                if "chat template" in str(e).lower():
-                    print("\nModel has no chat template — falling back to completions API.")
-                    self._use_chat_api = False
-                else:
-                    raise
-
         for _ in range(max_trials):
             try:
-                if self._use_chat_api:
-                    content = self._generate_chat(prompt, schema, verbose)
-                else:
-                    content = self._generate_completion(prompt, schema, verbose)
+                content = None
+                if self._use_chat_api is None:
+                    try:
+                        content = self._generate(prompt, schema, use_chat_api=True, verbose=verbose)
+                        self._use_chat_api = True
+                    except BadRequestError as e:
+                        if "chat template" in str(e).lower():
+                            print("\nModel has no chat template — falling back to completions API.")
+                            self._use_chat_api = False
+                        else:
+                            raise
+
+                assert self._use_chat_api is not None
+                if content is None:
+                    content = self._generate(prompt, schema, use_chat_api=self._use_chat_api, verbose=verbose)
 
                 if schema is not None:
-                    if not isinstance(content, dict):  # JSON-formatted response
-                        raise ValueError(f"Response is not a dictionary: {content}")
                     _check_schema(content, schema)
 
             except Exception as e:
@@ -253,7 +350,11 @@ class OutlinesLocalLLM(LLM):
         self.hf_tokenizer = hf_tokenizer
 
     def generate(
-        self, prompt: str, schema: None | dict[str, Any] = None, verbose: bool = False, max_trials: int = 10
+        self,
+        prompt: str,
+        schema: None | dict[str, Any] | str | list[str] = None,
+        verbose: bool = False,
+        max_trials: int = 10,
     ) -> str | dict[str, Any]:
         """
         Generate a response from the LLM given a prompt and an optional output type. The output type is used to specify
@@ -266,6 +367,9 @@ class OutlinesLocalLLM(LLM):
 
         :return: The response from the LLM, either as a string or in the specified format (e.g. a dict conforming to the JSON schema).
         """
+        if isinstance(schema, list) or isinstance(schema, str):
+            raise ValueError(f"Schema type {type(schema)} is not supported by OutlinesLocalLLM.")
+
         from outlines.types.dsl import JsonSchema
 
         chat = [
@@ -280,9 +384,6 @@ class OutlinesLocalLLM(LLM):
                 output = self.model(input_ids, JsonSchema(schema) if schema else str)
 
                 if schema is not None:
-                    if not isinstance(output, dict):  # JSON-formatted response
-                        raise ValueError(f"Response is not a dictionary: {output}")
-
                     _check_schema(output, schema)
 
             except Exception as e:

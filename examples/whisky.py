@@ -1,5 +1,15 @@
+import os
+
 from priorbot.llm import OpenAICompatLLM
-from priorbot.priors import BarkerLLMPrior, GibbsLLMPrior, LLMPrior, GamblingLLMPrior, UniformPrior
+from priorbot.priors import (
+    BarkerLLMPrior,
+    GibbsLLMPrior,
+    LLMPrior,
+    GamblingLLMPrior,
+    UniformPrior,
+    BarkerGibbsLLMPrior,
+    GamblingGibbsLLMPrior,
+)
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
@@ -7,7 +17,13 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--model-name", type=str, required=True)
     parser.add_argument("--base-url", type=str, default=None)
-    parser.add_argument("--prior", type=str, choices=["uniform", "direct", "gibbs", "barker", "gambling", "gambling_gibbs"], default="gambling")
+    parser.add_argument("--api-key", type=str, default="dummy")
+    parser.add_argument(
+        "--prior",
+        type=str,
+        choices=["uniform", "direct", "gibbs", "barker", "gambling", "barker_gibbs", "gambling_gibbs"],
+        default="gambling",
+    )
     args = parser.parse_args()
 
     schema = {
@@ -37,6 +53,7 @@ if __name__ == "__main__":
 
     system_prompt = "You are a data scientist and whisky expert tasked with investigating purchase records from a popular Scottish supermarket."
 
+    os.environ["OPENAI_API_KEY"] = args.api_key
     llm = OpenAICompatLLM(
         base_url=args.base_url,
         model_name=args.model_name,
@@ -52,14 +69,20 @@ if __name__ == "__main__":
         case "direct":
             prior = LLMPrior(llm=llm)
         case "gibbs":
-            prior = GibbsLLMPrior(base_prior=LLMPrior(llm=llm), burn_in=10, thinning=5)
+            prior = GibbsLLMPrior(llm_prior=LLMPrior(llm=llm), burn_in=10, thinning=5)
         case "barker":
             prior = BarkerLLMPrior(llm=llm, thinning=5)
         case "gambling":
             prior = GamblingLLMPrior(llm=llm, thinning=5)
+        case "barker_gibbs":
+            prior = BarkerGibbsLLMPrior(
+                llm=llm,
+                burn_in=10,
+                thinning=5,
+            )
         case "gambling_gibbs":
-            prior = GibbsLLMPrior(
-                base_prior=GamblingLLMPrior(llm=llm, burn_in=0, thinning=1),
+            prior = GamblingGibbsLLMPrior(
+                llm=llm,
                 burn_in=10,
                 thinning=5,
             )

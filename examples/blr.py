@@ -1,4 +1,6 @@
+import os
 from argparse import ArgumentParser
+
 from priorbot.data import load_dataset, split_dataset
 from priorbot.llm import OpenAICompatLLM
 from priorbot.priors import LLMPrior, EmpiricalPrior, GibbsLLMPrior, BarkerLLMPrior, GamblingLLMPrior
@@ -11,6 +13,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset-path", type=str, required=True, help="Path to the dataset (in JSON format)")
     parser.add_argument("--model-name", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct", help="Name of the LLM model to use for the prior")
     parser.add_argument("--base-url", type=str, default=None, help="Base URL for the LLM API (if using a remote model)")
+    parser.add_argument("--api-key", type=str, default="dummy", help="API key for the LLM API")
     parser.add_argument("--n-samples", type=int, default=128, help="Number of samples to draw from the prior")
     parser.add_argument("--prior", type=str, choices=["direct", "gibbs", "barker", "gambling"], default="gambling")
     args = parser.parse_args()
@@ -18,6 +21,7 @@ if __name__ == "__main__":
     dataset = load_dataset(args.dataset_path)
     train_dataset, test_dataset = split_dataset(dataset, 0.8)
 
+    os.environ["OPENAI_API_KEY"] = args.api_key
     system_prompt = f"You are an expert in the field of {dataset.domain}. Your top priority is to provide statisticians with the domain knowledge required to analyse their data. {dataset.description}"
     llm = OpenAICompatLLM(model_name=args.model_name, base_url=args.base_url, system_prompt=system_prompt)
 
