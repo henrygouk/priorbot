@@ -2,6 +2,7 @@ from typing import Any, List
 import numpy as np
 from scipy.stats import dirichlet
 from sklearn.base import BaseEstimator, clone
+from sklearn.pipeline import Pipeline
 from .data import Dataset
 from .priors import Prior, EmpiricalPrior
 
@@ -90,7 +91,10 @@ class DPGBClassifier:
         ]
 
         for i in range(self.n_estimators):
-            self.estimators_[i].fit(X, y, sample_weight=dirichlet_samples[i], **fit_params)
+            fit_kwargs = {"sample_weight": dirichlet_samples[i], **fit_params}
+            if isinstance(self.estimators_[i], Pipeline):
+                fit_kwargs = {f"{self.estimators_[i].steps[-1][0]}__sample_weight": dirichlet_samples[i], **fit_params}
+            self.estimators_[i].fit(X, y, **fit_kwargs)
 
         return self
 
@@ -142,7 +146,10 @@ class DPGBClassifier:
             combined_X = np.vstack([prior_X, real_X])
             combined_y = np.hstack([prior_y, real_y])
             
-            self.estimators_[i].fit(combined_X, combined_y, sample_weight=weights, **fit_params)
+            fit_kwargs = {"sample_weight": weights, **fit_params}
+            if isinstance(self.estimators_[i], Pipeline):
+                fit_kwargs = {f"{self.estimators_[i].steps[-1][0]}__sample_weight": weights, **fit_params}
+            self.estimators_[i].fit(combined_X, combined_y, **fit_kwargs)
 
         return self
 
