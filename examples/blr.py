@@ -36,6 +36,7 @@ if __name__ == "__main__":
         choices=["direct", "gibbs", "barker", "gambling", "gambling_gibbs"],
         default="gambling",
     )
+    parser.add_argument("--verbose", action="store_true", help="Whether to print verbose output during sampling")
     args = parser.parse_args()
 
     dataset = load_dataset(args.dataset_path)
@@ -59,7 +60,7 @@ if __name__ == "__main__":
         case "direct":
             base_prior = LLMPrior(llm=llm)
         case "gibbs":
-            base_prior = GibbsLLMPrior(base_prior=LLMPrior(llm=llm), burn_in=10, thinning=5)
+            base_prior = GibbsLLMPrior(llm_prior=LLMPrior(llm=llm), burn_in=10, thinning=5)
         case "barker":
             base_prior = BarkerLLMPrior(llm=llm, thinning=5)
         case "gambling":
@@ -79,7 +80,7 @@ if __name__ == "__main__":
         "required": dataset.feature_schema["required"] + dataset.target_schema["required"]
     }
 
-    prior_samples = base_prior.sample(args.n_samples, schema=full_schema, verbose=True)
+    prior_samples = base_prior.sample(args.n_samples, schema=full_schema, verbose=args.verbose)
     prior = EmpiricalPrior(prior_samples)
 
     base_model = LogisticRegression(solver="liblinear")
