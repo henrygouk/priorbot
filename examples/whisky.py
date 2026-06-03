@@ -10,6 +10,7 @@ from priorbot.priors import (
     BarkerGibbsLLMPrior,
     GamblingGibbsLLMPrior,
 )
+from priorbot.proposals import LLMProposalGenerator
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
@@ -33,7 +34,7 @@ if __name__ == "__main__":
                 "type": "string",
                 "enum": ["Glenfiddich", "Macallan", "Lagavulin", "Laphroaig", "Ardbeg"]
             },
-            "Age (years)": {
+            "Aged (years)": {
                 "type": "integer",
                 "maximum": 100,
                 "minimum": 1,
@@ -48,10 +49,10 @@ if __name__ == "__main__":
                 "enum": ["Speyside", "Islay"]
             }
         },
-        "required": ["Distillery", "Age (years)", "ABV (%)", "Region"]
+        "required": ["Distillery", "Aged (years)", "ABV (%)", "Region"]
     }
 
-    system_prompt = "You are a data scientist and whisky expert tasked with investigating purchase records from a popular Scottish supermarket."
+    system_prompt = "You are a data scientist and whisky expert tasked with investigating purchase records from a popular Scottish supermarket. Keep all reasoning concise and do not second guess yourself."
 
     os.environ["OPENAI_API_KEY"] = args.api_key
     llm = OpenAICompatLLM(
@@ -60,7 +61,7 @@ if __name__ == "__main__":
         system_prompt=system_prompt,
         temperature=1.0,
         top_p=1.0,
-        max_tokens=64,
+        max_tokens=2048,
     )
 
     match args.prior:
@@ -71,20 +72,22 @@ if __name__ == "__main__":
         case "gibbs":
             prior = GibbsLLMPrior(llm_prior=LLMPrior(llm=llm), burn_in=10, thinning=5)
         case "barker":
-            prior = BarkerLLMPrior(llm=llm, thinning=5)
+            prior = BarkerLLMPrior(llm=llm, thinning=5, proposal_generator=LLMProposalGenerator(llm=llm, verbose=True))
         case "gambling":
-            prior = GamblingLLMPrior(llm=llm, thinning=5)
+            prior = GamblingLLMPrior(llm=llm, thinning=5, proposal_generator=LLMProposalGenerator(llm=llm, verbose=True))
         case "barker_gibbs":
             prior = BarkerGibbsLLMPrior(
                 llm=llm,
                 burn_in=10,
                 thinning=5,
+                proposal_generator=LLMProposalGenerator(llm=llm, verbose=True),
             )
         case "gambling_gibbs":
             prior = GamblingGibbsLLMPrior(
                 llm=llm,
                 burn_in=10,
                 thinning=5,
+                proposal_generator=LLMProposalGenerator(llm=llm, verbose=True)
             )
         case _:
             raise ValueError("Invalid prior type")
