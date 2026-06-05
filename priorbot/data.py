@@ -79,6 +79,52 @@ def split_dataset(dataset: Dataset, train_fraction: float) -> Tuple[Dataset, Dat
     )
     return train_dataset, test_dataset
 
+def cross_validation_splits(dataset: Dataset, num_folds: int, seed: int | None=None) -> List[Tuple[Dataset, Dataset]]:
+    """
+    Generate cross-validation splits for a dataset.
+
+    Args:
+        dataset (Dataset): The dataset to split.
+        num_folds (int): The number of folds for cross-validation.
+
+    Returns:
+        List[Tuple[Dataset, Dataset]]: A list of tuples, where each tuple contains a training and testing dataset for one fold.
+    """
+    data = dataset.data.copy()
+
+    if seed is not None:
+        np.random.seed(seed)
+        indices = np.random.permutation(len(data))
+        data = [data[i] for i in indices]
+
+    fold_size = len(data) // num_folds
+    splits = []
+    for i in range(num_folds):
+        test_data = data[i*fold_size:(i+1)*fold_size]
+        train_data = data[:i*fold_size] + data[(i+1)*fold_size:]
+        train_dataset = Dataset(
+            name=dataset.name + f" (train fold {i+1})",
+            info=dataset.info,
+            domain=dataset.domain,
+            description=dataset.description,
+            feature_schema=dataset.feature_schema,
+            target_schema=dataset.target_schema,
+            data=train_data,
+            reasoning=dataset.reasoning[:i*fold_size] + dataset.reasoning[(i+1)*fold_size:] if dataset.reasoning else None
+        )
+        test_dataset = Dataset(
+            name=dataset.name + f" (test fold {i+1})",
+            info=dataset.info,
+            domain=dataset.domain,
+            description=dataset.description,
+            feature_schema=dataset.feature_schema,
+            target_schema=dataset.target_schema,
+            data=test_data,
+            reasoning=dataset.reasoning[i*fold_size:(i+1)*fold_size] if dataset.reasoning else None
+        )
+        splits.append((train_dataset, test_dataset))
+    return splits
+
 @dataclass
 class ARFFAttribute:
     name: str
