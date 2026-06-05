@@ -6,6 +6,69 @@ from sklearn.pipeline import Pipeline
 from .data import Dataset
 from .priors import Prior, EmpiricalPrior
 
+def roc_auc_score(y_true, y_proba_dicts):
+    """
+    Compute the ROC AUC score for a multi-class classification problem.
+
+    Parameters
+    ----------
+    y_true : array-like, shape (n_samples,)
+        True class labels.
+    y_proba_dicts : list of dict
+        List of dictionaries containing predicted probabilities for each class. Each dictionary should have class labels as keys and predicted probabilities as values.
+
+    Returns
+    -------
+    float
+        The computed ROC AUC score.
+    """
+    from sklearn.metrics import roc_auc_score as sklearn_roc_auc_score
+
+    # Extract class labels and predicted probabilities
+    classes = sorted(y_proba_dicts[0].keys())
+    y_proba = np.array([
+        [proba_dict[cls_name] for cls_name in classes] for proba_dict in y_proba_dicts
+    ])
+
+    if len(classes) == 2:
+        y_proba = y_proba[:, 1]
+
+    y_true_idx = np.zeros(len(y_true))
+
+    for i, label in enumerate(y_true):
+        y_true_idx[i] = classes.index(label)
+
+    return sklearn_roc_auc_score(y_true_idx, y_proba, multi_class="ovr")
+
+def log_likelihood(y_true, y_proba_dicts):
+    """
+    Compute the log likelihood of the true labels given the predicted probabilities.
+
+    Parameters
+    ----------
+    y_true : array-like, shape (n_samples,)
+        True class labels.
+    y_proba_dicts : list of dict
+        List of dictionaries containing predicted probabilities for each class. Each dictionary should have class labels as keys and predicted probabilities as values.
+
+    Returns
+    -------
+    float
+        The computed log likelihood.
+    """
+    log_likelihood = 0.0
+
+    for i in range(len(y_true)):
+        proba_dict = y_proba_dicts[i]
+        true_label = y_true[i]
+
+        if true_label in proba_dict:
+            log_likelihood += np.log(max(proba_dict[true_label], 1e-8))
+        else:
+            log_likelihood += np.log(1e-8)
+
+    return log_likelihood
+
 class DPGBClassifier:
     """
     Dirichlet Process Generalised Bayes classifier.
@@ -51,6 +114,44 @@ class DPGBClassifier:
         self.oversampling_factor = oversampling_factor
         self.random_state = random_state
 
+    def _get_class_index(self, data_point: dict[str, Any]) -> int | None:
+        if self.target_name_ in data_point:
+            target_value = data_point[self.target_name_]
+            return self.classes_.index(target_value)
+        else:
+            return None
+
+    def _to_sklearn_format(self, data: List[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Convert a list of dictionaries to the format expected by scikit-learn.
+
+        Categorical features and targets will be encoded as integers based on their index in the enum list in the schema.
+
+        Parameters
+        ----------
+        data : list of dict
+            The input data, where each element is a dictionary representing a data point.
+
+        Returns
+        -------
+        tuple of (X, y)
+            X is a 2D numpy array of shape (n_samples, n_features) containing the feature values,
+            and y is a 1D numpy array of shape (n_samples,) containing the target values.
+        """
+        if len(data) == 0:
+            return np.empty((0, len(self.feature_names_))), np.empty((0,))
+
+        X = np.array([[data_point[feature] for feature in self.feature_names_] for data_point in data])
+        y = np.array([self._get_class_index(data_point) for data_point in data])
+
+        # Convert categorical features and targets to integer indices based on the schema
+        for idx, f in enumerate(self.feature_names_):
+            if f in self.feature_maps_:
+                feature_map = self.feature_maps_[f]
+                X[:, idx] = np.array([feature_map[value] for value in X[:, idx]])
+
+        return X.astype(float), y
+
     def _fit_empirical_prior(self, dataset: Dataset, prior: EmpiricalPrior, **fit_params):
         """
         Fit the posterior in the case where the prior is a mixture of delta distributions.
@@ -64,25 +165,30 @@ class DPGBClassifier:
         fit_params : dict
             Additional parameters to be passed to the base estimator when fitting.
         """
-        self.feature_names_ = dataset.feature_schema.get("properties", {}).keys()
-        self.target_name_ = list(dataset.target_schema["properties"])[0]
-        X = np.array([[data_point[feature] for feature in self.feature_names_] for data_point in dataset.data])
-        y = np.array([data_point[self.target_name_] for data_point in dataset.data])
+
+        X, y = self._to_sklearn_format(dataset.data)
 
         if isinstance(prior, EmpiricalPrior) and self.alpha > 0:
             n_prior = len(prior.samples)
+            prior_samples = self._to_sklearn_format(prior.samples)
         else:
             n_prior = 0
 
-        n_total = X.shape[0] + n_prior
+        n_total = len(X) + n_prior
         alpha = np.ones(n_total)
 
         if n_prior > 0:
             alpha[:n_prior] = self.alpha / n_prior
-            prior_X = np.array([[sample[feature] for feature in self.feature_names_] for sample in prior.samples])
-            prior_y = np.array([sample[self.target_name_] for sample in prior.samples])
-            X = np.vstack([prior_X, X])
-            y = np.hstack([prior_y, y])
+            # prior_X = np.array([[sample[feature] for feature in self.feature_names_] for sample in prior_samples])
+            # prior_y = np.array([sample[self.target_name_] for sample in prior_samples])
+            prior_X, prior_y = prior_samples
+
+            if len(X) > 0:
+                X = np.vstack([prior_X, X])
+                y = np.hstack([prior_y, y])
+            else:
+                X = prior_X
+                y = prior_y
 
         dirichlet_samples = dirichlet.rvs(alpha, size=self.n_estimators, random_state=self.random_state)
 
@@ -92,8 +198,10 @@ class DPGBClassifier:
 
         for i in range(self.n_estimators):
             fit_kwargs = {"sample_weight": dirichlet_samples[i], **fit_params}
+
             if isinstance(self.estimators_[i], Pipeline):
                 fit_kwargs = {f"{self.estimators_[i].steps[-1][0]}__sample_weight": dirichlet_samples[i], **fit_params}
+
             self.estimators_[i].fit(X, y, **fit_kwargs)
 
         return self
@@ -115,10 +223,8 @@ class DPGBClassifier:
             self.base_estimator.__class__(**self.base_estimator.get_params())
             for _ in range(self.n_estimators)
         ]
-        self.feature_names_ = dataset.feature_schema.get("properties", {}).keys()
-        self.target_name_ = list(dataset.target_schema["properties"])[0]
-        X = np.array([[data_point[feature] for feature in self.feature_names_] for data_point in dataset.data])
-        y = np.array([data_point[self.target_name_] for data_point in dataset.data])
+
+        X, y = self._to_sklearn_format(dataset.data)
 
         joint_schema = dataset.feature_schema.copy()
         joint_schema["properties"].update(dataset.target_schema["properties"])
@@ -137,8 +243,7 @@ class DPGBClassifier:
             n_samples = self.n_breaks - n_prior
 
             prior_data = prior.sample(n_prior, joint_schema)
-            prior_X = np.array([[data_point[feature] for feature in self.feature_names_] for data_point in prior_data])
-            prior_y = np.array([data_point[self.target_name_] for data_point in prior_data])
+            prior_X, prior_y = self._to_sklearn_format(prior_data)
 
             real_indices = np.random.choice(X.shape[0], n_samples, replace=True)
             (real_X, real_y) = (X[real_indices], y[real_indices])
@@ -147,8 +252,10 @@ class DPGBClassifier:
             combined_y = np.hstack([prior_y, real_y])
             
             fit_kwargs = {"sample_weight": weights, **fit_params}
+
             if isinstance(self.estimators_[i], Pipeline):
                 fit_kwargs = {f"{self.estimators_[i].steps[-1][0]}__sample_weight": weights, **fit_params}
+
             self.estimators_[i].fit(combined_X, combined_y, **fit_kwargs)
 
         return self
@@ -166,6 +273,25 @@ class DPGBClassifier:
         fit_params : dict
             Additional parameters to be passed to the base estimator when fitting.
         """
+        self.feature_names_ = list(dataset.feature_schema.get("properties", {}).keys())
+        self.feature_maps_ = {}
+        self.target_name_ = list(dataset.target_schema["properties"])[0]
+        
+        for f in self.feature_names_:
+            schema = dataset.feature_schema["properties"][f]
+
+            if schema["type"] == "string":
+                feature_map = {value: index for index, value in enumerate(schema["enum"])}
+                self.feature_maps_[f] = feature_map
+
+        target_schema = dataset.target_schema["properties"][self.target_name_]
+
+        if target_schema["type"] != "string":
+            raise ValueError("Target variable must be categorical (type 'string') for classification.")
+
+        target_schema = dataset.target_schema["properties"][self.target_name_]
+        self.classes_ = list(target_schema["enum"])
+
         if isinstance(prior, EmpiricalPrior):
             return self._fit_empirical_prior(dataset, prior, **fit_params)
         else:
@@ -188,11 +314,24 @@ class DPGBClassifier:
         if not hasattr(self, 'estimators_'):
             raise RuntimeError("The model has not been fitted yet.")
 
-        X_sklearn = np.array([[data_point[feature] for feature in self.feature_names_] for data_point in X])
+        X_sklearn, _ = self._to_sklearn_format(X)
 
         # Aggregate predictions from all estimators
         predictions = np.array([estimator.predict_proba(X_sklearn) for estimator in self.estimators_])
-        return np.mean(predictions, axis=0)
+        proba = np.mean(predictions, axis=0)
+
+        # Convert to dict format
+        proba_dicts = []
+
+        for i in range(proba.shape[0]):
+            if len(self.classes_) == 2:
+                proba_dict = {self.classes_[0]: proba[i, 0], self.classes_[1]: 1.0 - proba[i, 0]}
+            else:
+                proba_dict = {self.classes_[j]: proba[i, j] for j in range(proba.shape[1])}
+
+            proba_dicts.append(proba_dict)
+
+        return proba_dicts
     
     def predict_dict(self, X: List[dict[str, Any]]):
         """
@@ -208,6 +347,7 @@ class DPGBClassifier:
         array-like, shape (n_samples,)
             Predicted class labels.
         """
-        proba = self.predict_proba_dict(X)
-        return np.argmax(proba, axis=1) if proba.ndim > 1 else np.round(proba).astype(int)
+        proba_dicts = self.predict_proba_dict(X)
+        predictions = [max(proba_dict, key=proba_dict.get) for proba_dict in proba_dicts]
+        return predictions
 
