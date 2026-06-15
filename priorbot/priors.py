@@ -257,18 +257,26 @@ def default_llm_template(schema: dict[str, Any], observed: dict[str, Any] | None
         return f"Generate a data point that conforms to the following schema: {json.dumps(schema)}"
 
 
+DEFAULT_REASONING_PROMPT = (
+    "The step-by-step reasoning for the {obj}. "
+    "This should be the first field in the JSON object."
+)
+
+
 class LLMPrior(AsyncPrior):
     def __init__(
         self,
         llm: LLM,
         template: Callable[[dict[str, Any], dict[str, Any] | None], str] = default_llm_template,
-        manual_reasoning: bool = False,
         shuffle_variables: bool = True,
+        manual_reasoning: bool = False,
+        reasoning_prompt: str = DEFAULT_REASONING_PROMPT.format(obj="generation of the data point"),
     ):
         self.llm = llm
         self.template = template
-        self.manual_reasoning = manual_reasoning
         self.shuffle_variables = shuffle_variables
+        self.manual_reasoning = manual_reasoning
+        self.reasoning_prompt = reasoning_prompt
 
     def _sample_impl(
         self,
@@ -289,24 +297,17 @@ class LLMPrior(AsyncPrior):
                 schema["properties"] = {k: schema["properties"][k] for k in keys}
                 schema["required"] = keys
 
-            prompt = self.template(schema, observed)
-
             if self.manual_reasoning:
                 gen_schema = deepcopy(schema)
                 gen_schema["properties"] = {
-                    "reasoning": {
-                        "type": "string",
-                        "description": (
-                            "A step by step explanation of the reasoning behind the sampling process. "
-                            "This should be the first field in the JSON object."
-                        ),
-                    },
+                    "reasoning": {"type": "string", "description": self.reasoning_prompt},
                     **gen_schema["properties"],
                 }
                 gen_schema["required"] = ["reasoning"] + gen_schema["required"]
             else:
                 gen_schema = schema
 
+            prompt = self.template(gen_schema, observed)
             sample = self.llm.generate(prompt, gen_schema, verbose)
 
             if isinstance(sample, dict):
@@ -399,20 +400,24 @@ class MCMCLLMPrior(AsyncPrior):
     def __init__(
         self,
         llm: LLM,
+        template: Callable[..., str],
         burn_in: int,
         thinning: int,
         shuffle_variables: bool = True,
-        manual_reasoning: bool = False,
         max_trials: int = 10,
+        manual_reasoning: bool = False,
+        reasoning_prompt: str = DEFAULT_REASONING_PROMPT.format(obj="decision"),
     ):
         self.llm = llm
+        self.template = template
         self.discrete_proposal_dist = UniformPrior()
         self.continuous_proposal_dist = UniformPrior()
         self.burn_in = burn_in
         self.thinning = thinning
         self.shuffle_variables = shuffle_variables
-        self.manual_reasoning = manual_reasoning
         self.max_trials = max_trials
+        self.manual_reasoning = manual_reasoning
+        self.reasoning_prompt = reasoning_prompt
 
     @staticmethod
     def _sample_single(
@@ -617,19 +622,20 @@ def default_barker_template(
     )
     return template
 
+
 class BarkerLLMPrior(MCMCLLMPrior):
     def __init__(
         self,
         llm: LLM,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
         burn_in: int = 10,
         thinning: int = 1,
         shuffle_variables: bool = True,
-        manual_reasoning: bool = False,
         max_trials: int = 10,
-        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
+        manual_reasoning: bool = False,
+        reasoning_prompt: str = DEFAULT_REASONING_PROMPT.format(obj="choice"),
     ):
-        super().__init__(llm, burn_in, thinning, shuffle_variables, manual_reasoning, max_trials)
-        self.template = template
+        super().__init__(llm, template, burn_in, thinning, shuffle_variables, max_trials, manual_reasoning, reasoning_prompt)
 
     def _acceptance(
         self,
@@ -651,10 +657,7 @@ class BarkerLLMPrior(MCMCLLMPrior):
 
         if self.manual_reasoning:
             binary_schema["properties"] = {
-                "reasoning": {
-                    "type": "string",
-                    "description": "A step by step explanation of the reasoning behind the decision. This should be the first field in the JSON object."
-                },
+                "reasoning": {"type": "string", "description": self.reasoning_prompt},
                 **binary_schema["properties"],
             }
             binary_schema["required"] = ["reasoning"] + binary_schema["required"]
@@ -695,15 +698,15 @@ class GamblingLLMPrior(MCMCLLMPrior):
     def __init__(
         self,
         llm: LLM,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
         burn_in: int = 10,
         thinning: int = 1,
         shuffle_variables: bool = True,
-        manual_reasoning: bool = False,
         max_trials: int = 10,
-        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
+        manual_reasoning: bool = False,
+        reasoning_prompt: str = DEFAULT_REASONING_PROMPT.format(obj="decision to place a bet or not"),
     ):
-        super().__init__(llm, burn_in, thinning, shuffle_variables, manual_reasoning, max_trials)
-        self.template = template
+        super().__init__(llm, template, burn_in, thinning, shuffle_variables, max_trials, manual_reasoning, reasoning_prompt)
 
     def _acceptance(
         self,
@@ -728,10 +731,7 @@ class GamblingLLMPrior(MCMCLLMPrior):
 
         if self.manual_reasoning:
             binary_schema["properties"] = {
-                "reasoning": {
-                    "type": "string",
-                    "description": "A step by step explanation of the reasoning behind the decision to place a bet or not. This should be the first field in the JSON object."
-                },
+                "reasoning": {"type": "string", "description": self.reasoning_prompt},
                 **binary_schema["properties"],
             }
             binary_schema["required"] = ["reasoning"] + binary_schema["required"]
@@ -748,15 +748,17 @@ class MetropolisWithinGibbsLLMPrior(MCMCLLMPrior):
     def __init__(
         self,
         llm: LLM,
+        template: Callable[..., str],
         burn_in: int,
         thinning: int,
+        shuffle_variables: bool = True,
+        max_trials: int = 10,
+        manual_reasoning: bool = False,
+        reasoning_prompt: str = DEFAULT_REASONING_PROMPT.format(obj="decision"),
         block_size: int = 1,
         sweep: bool = False,
-        shuffle_variables: bool = True,
-        manual_reasoning: bool = False,
-        max_trials: int = 10,
     ):
-        super().__init__(llm, burn_in, thinning, shuffle_variables, manual_reasoning, max_trials)
+        super().__init__(llm, template, burn_in, thinning, shuffle_variables, max_trials, manual_reasoning, reasoning_prompt)
         self.block_size = block_size
         self.sweep = sweep
         if not (self.shuffle_variables or self.sweep):
@@ -871,19 +873,19 @@ class BarkerGibbsLLMPrior(MetropolisWithinGibbsLLMPrior, BarkerLLMPrior):
     def __init__(
         self,
         llm: LLM,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
         burn_in: int = 10,
         thinning: int = 1,
+        shuffle_variables: bool = True,
+        max_trials: int = 10,
+        manual_reasoning: bool = False,
+        reasoning_prompt: str = DEFAULT_REASONING_PROMPT.format(obj="choice"),
         block_size: int = 1,
         sweep: bool = False,
-        shuffle_variables: bool = True,
-        manual_reasoning: bool = False,
-        max_trials: int = 10,
-        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any] | None], str] = default_barker_template,
     ):
         super().__init__(
-            llm, burn_in, thinning, block_size, sweep, shuffle_variables, manual_reasoning, max_trials,
+            llm, template, burn_in, thinning, shuffle_variables, max_trials, manual_reasoning, reasoning_prompt, block_size, sweep
         )
-        self.template = template
 
 
 class GamblingGibbsLLMPrior(MetropolisWithinGibbsLLMPrior, GamblingLLMPrior):
@@ -900,19 +902,19 @@ class GamblingGibbsLLMPrior(MetropolisWithinGibbsLLMPrior, GamblingLLMPrior):
     def __init__(
         self,
         llm: LLM,
+        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
         burn_in: int = 10,
         thinning: int = 1,
+        shuffle_variables: bool = True,
+        max_trials: int = 10,
+        manual_reasoning: bool = False,
+        reasoning_prompt: str = DEFAULT_REASONING_PROMPT.format(obj="decision to place a bet or not"),
         block_size: int = 1,
         sweep: bool = False,
-        shuffle_variables: bool = True,
-        manual_reasoning: bool = False,
-        max_trials: int = 10,
-        template: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], float, dict[str, Any] | None], str] = default_gambling_template,
     ):
         super().__init__(
-            llm, burn_in, thinning, block_size, sweep, shuffle_variables, manual_reasoning, max_trials,
+            llm, template, burn_in, thinning, shuffle_variables, max_trials, manual_reasoning, reasoning_prompt, block_size, sweep
         )
-        self.template = template
 
 
 class SplitJointConditionalPrior(Prior):
