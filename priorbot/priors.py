@@ -258,7 +258,7 @@ def default_llm_template(schema: dict[str, Any], observed: dict[str, Any] | None
 
 
 DEFAULT_REASONING_PROMPT = (
-    "The step-by-step reasoning for the {obj}. "
+    "A step-by-step explanation of the reasoning behind the {obj}. "
     "This should be the first field in the JSON object."
 )
 
