@@ -60,28 +60,52 @@ def _check_schema(content: dict[str, Any] | str, schema: dict[str, Any] | str | 
         if not isinstance(content, dict):  # JSON-formatted response
             raise ValueError(f"Response is not a dictionary: {content}")
 
-        _check_json_schema(content, schema)
+        props = schema.get("properties", {})
+        for key, value in content.items():
+            if key in props:
+                _check_json_schema_value(value, props[key], key=key)
+
+        required = schema.get("required", [])
+        for key in required:
+            if key not in content:
+                raise ValueError(f"Key {key} is required but not present in data {content} for schema {schema}")
 
 
-def _check_json_schema(content: dict[str, Any], schema: dict[str, Any]) -> None:
-    """Raise an error if the data does not satisfy the schema."""
-    props = schema.get("properties", {})
-    for key, value in content.items():
-        if key in props and props[key]["type"] in ["number", "integer"]:
-            lo = props[key].get("minimum")
-            hi = props[key].get("maximum")
-            if (lo is not None and value < lo) or (hi is not None and value > hi):
-                raise ValueError(f"Value {value} for key {key} is out of bounds for schema {schema}")
-
-        if key in props and props[key]["type"] == "string":
-            enum = props[key].get("enum")
-            if enum is not None and value not in enum:
-                raise ValueError(f"Value {value} for key {key} is not in enum {enum} for schema {schema}")
-
-    required = schema.get("required", [])
-    for key in required:
-        if key not in content:
-            raise ValueError(f"Key {key} is required but not present in data {content} for schema {schema}")
+def _check_json_schema_value(value: Any, subschema: dict[str, Any], key: str) -> None:
+    """Validate a single value against a JSON-schema subschema."""
+    val_type = subschema.get("type")
+    if val_type in ("number", "integer"):
+        if not isinstance(value, (int, float) if val_type == "number" else int) or isinstance(value, bool):
+            raise ValueError(f"Value {value} for key {key} is not a {val_type} value for schema {subschema}")
+        lo = subschema.get("minimum")
+        hi = subschema.get("maximum")
+        if (lo is not None and value < lo) or (hi is not None and value > hi):
+            raise ValueError(f"Value {value} for key {key} is out of bounds for schema {subschema}")
+    elif val_type == "string":
+        if not isinstance(value, str):
+            raise ValueError(f"Value {value} for key {key} is not a string for schema {subschema}")
+        enum = subschema.get("enum")
+        if enum is not None and value not in enum:
+            raise ValueError(f"Value {value} for key {key} is not in enum {enum} for schema {subschema}")
+    elif val_type == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"Value {value} for key {key} is not an array for schema {subschema}")
+        min_items = subschema.get("minItems")
+        max_items = subschema.get("maxItems")
+        if min_items is not None and len(value) < min_items:
+            raise ValueError(
+                f"Array for key {key} has {len(value)} items, expected at least {min_items} "
+                f"for schema {subschema}"
+            )
+        if max_items is not None and len(value) > max_items:
+            raise ValueError(
+                f"Array for key {key} has {len(value)} items, expected at most {max_items} "
+                f"for schema {subschema}"
+            )
+        items_schema = subschema.get("items")
+        if isinstance(items_schema, dict):
+            for i, item in enumerate(value):
+                _check_json_schema_value(item, items_schema, key=f"{key}[{i}]")
 
 
 class LLM:
