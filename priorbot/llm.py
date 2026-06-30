@@ -6,7 +6,7 @@ import json
 import re
 
 
-def _openai_args_for_base_url(base_url: str) -> dict:
+def _localhost_openai_client_kwargs(base_url: str) -> dict:
     """Bypass cluster HTTP proxies for local vLLM (Squid cannot reach localhost)."""
     host = (urlparse(base_url).hostname or "").lower()
     if host in {"localhost", "127.0.0.1", "::1"}:
@@ -146,9 +146,11 @@ class OpenAICompatLLM(LLM):
         self.base_url = base_url
         self.system_prompt = system_prompt
 
-        openai_args = kwargs.get("openai_args", {})
-        openai_args.update(_openai_args_for_base_url(base_url))
-        self.client = OpenAI(base_url=base_url, **openai_args)
+        openai_kwargs = {
+            **kwargs.get("openai_kwargs", {}),
+            **_localhost_openai_client_kwargs(base_url),
+        }
+        self.client = OpenAI(base_url=base_url, **openai_kwargs)
 
         self.max_tokens = kwargs.get("max_tokens", 1024)
         self.temperature = kwargs.get("temperature", 1.0)
@@ -266,6 +268,9 @@ class OpenAICompatLLM(LLM):
 
         :return: The response from the LLM, either as a string or in the specified format (e.g. a dict conforming to the JSON schema).
         """
+        if max_trials < 1:
+            raise ValueError("max_trials must be at least 1.")
+
         from openai import BadRequestError
 
         for i in range(max_trials):
@@ -282,7 +287,9 @@ class OpenAICompatLLM(LLM):
                         else:
                             raise
 
-                assert self._use_chat_api is not None
+                if self._use_chat_api is None:
+                    raise RuntimeError("Failed to determine whether the model supports chat templates.")
+
                 if content is None:
                     content = self._generate(prompt, schema, use_chat_api=self._use_chat_api, verbose=verbose)
 
@@ -292,12 +299,11 @@ class OpenAICompatLLM(LLM):
                 return content
 
             except Exception as e:
-                print(f"Error during generation: {e}.")
+                print(f"Error during generation:\n{e}")
                 if i < max_trials - 1:
-                    print(f"Retrying... ({i + 1}/{max_trials})")
-                    continue
-                else:
-                    raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
+                    print(f"Retrying ({i + 1}/{max_trials}) ...")
+
+        raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
 
 
 class OutlinesLocalLLM(LLM):
@@ -366,6 +372,9 @@ class OutlinesLocalLLM(LLM):
 
         :return: The response from the LLM, either as a string or in the specified format (e.g. a dict conforming to the JSON schema).
         """
+        if max_trials < 1:
+            raise ValueError("max_trials must be at least 1.")
+
         if isinstance(schema, list) or isinstance(schema, str):
             raise ValueError(f"Schema type {type(schema)} is not supported by OutlinesLocalLLM.")
 
@@ -388,12 +397,9 @@ class OutlinesLocalLLM(LLM):
                 return output
 
             except Exception as e:
-                print(f"Error during generation: {e}.")
+                print(f"Error during generation:\n{e}")
                 if i < max_trials - 1:
-                    print(f"Retrying... ({i + 1}/{max_trials})")
-                    continue
-                else:
-                    raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
+                    print(f"Retrying ({i + 1}/{max_trials}) ...")
 
         raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
 
