@@ -1,43 +1,7 @@
 from abc import abstractmethod
 from typing import Any
-import copy
 import json
 import re
-
-
-def _strip_xgrammar_buggy_number_bounds(schema: Any) -> Any:
-    """Workaround for an xgrammar bug in ``GenerateFloatRangeRegex``.
-
-    When a JSON-schema number/integer has both ``minimum`` and ``maximum`` set
-    and the closed range ``[minimum, maximum]`` overlaps the open interval
-    ``(-1, 0)``, xgrammar generates a regex whose negative branch starts at
-    ``-[1-9]`` and therefore excludes all ``-0.X`` values. We work around this
-    by returning a deep copy of ``schema`` with those bounds removed from any
-    affected numeric subschema. The original (bounded) schema is still used
-    client-side by ``_check_json_schema`` to reject out-of-range samples.
-    """
-
-    def _overlaps_neg_unit(lo: Any, hi: Any) -> bool:
-        if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
-            return False
-        return lo < 0.0 and hi > -1.0
-
-    def _walk(node: Any) -> None:
-        if isinstance(node, dict):
-            if node.get("type") in ("number", "integer") and _overlaps_neg_unit(
-                node.get("minimum"), node.get("maximum")
-            ):
-                node.pop("minimum", None)
-                node.pop("maximum", None)
-            for value in node.values():
-                _walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-
-    sanitized = copy.deepcopy(schema)
-    _walk(sanitized)
-    return sanitized
 
 
 def _check_schema(content: dict[str, Any] | str, schema: dict[str, Any] | str | list[str]) -> None:
@@ -165,8 +129,6 @@ class OpenAICompatLLM(LLM):
         - ``dict``: treat as a JSON schema.
         """
         if isinstance(schema, dict):
-            schema = _strip_xgrammar_buggy_number_bounds(schema)
-
             if use_chat_api:
                 # JSON schema is best expressed through response_format on chat.
                 return {
