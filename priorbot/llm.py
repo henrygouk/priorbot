@@ -1,7 +1,17 @@
 from abc import abstractmethod
 from typing import Any
+from urllib.parse import urlparse
+import httpx
 import json
 import re
+
+
+def _openai_args_for_base_url(base_url: str) -> dict:
+    """Bypass cluster HTTP proxies for local vLLM (Squid cannot reach localhost)."""
+    host = (urlparse(base_url).hostname or "").lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return {"http_client": httpx.Client(trust_env=False)}
+    return {}
 
 
 def _check_schema(content: dict[str, Any] | str, schema: dict[str, Any] | str | list[str]) -> None:
@@ -111,11 +121,15 @@ class OpenAICompatLLM(LLM):
         super().__init__(model_name, **kwargs)
         self.base_url = base_url
         self.system_prompt = system_prompt
-        self.client = OpenAI(base_url=base_url, **kwargs.get("openai_args", {}))
+
+        openai_args = kwargs.get("openai_args", {})
+        openai_args.update(_openai_args_for_base_url(base_url))
+        self.client = OpenAI(base_url=base_url, **openai_args)
+
         self.max_tokens = kwargs.get("max_tokens", 1024)
         self.temperature = kwargs.get("temperature", 1.0)
         self.top_p = kwargs.get("top_p", 1.0)
-        self._use_chat_api: bool | None = None
+        self._use_chat_api: bool | None = kwargs.get("use_chat_api", None)
 
     @staticmethod
     def _structured_outputs_kwargs(
@@ -230,7 +244,7 @@ class OpenAICompatLLM(LLM):
         """
         from openai import BadRequestError
 
-        for _ in range(max_trials):
+        for i in range(max_trials):
             try:
                 content = None
                 if self._use_chat_api is None:
@@ -251,13 +265,15 @@ class OpenAICompatLLM(LLM):
                 if schema is not None:
                     _check_schema(content, schema)
 
+                return content
+
             except Exception as e:
-                print(f"Error during generation: {e}. Retrying...")
-                continue
-
-            return content
-
-        raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
+                print(f"Error during generation: {e}.")
+                if i < max_trials - 1:
+                    print(f"Retrying... ({i + 1}/{max_trials})")
+                    continue
+                else:
+                    raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
 
 
 class OutlinesLocalLLM(LLM):
@@ -285,7 +301,7 @@ class OutlinesLocalLLM(LLM):
 
     response = llm.generate("Generate a data point that conforms to the following schema: {schema}", schema=schema)
     """
-    
+
     def __init__(self, model_name: str, system_prompt: str, **kwargs):
         """
         Initialise a local LLM using the outlines library. The system prompt is used to set the behaviour of the LLM.
@@ -302,10 +318,7 @@ class OutlinesLocalLLM(LLM):
         hf_model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
         hf_tokenizer = AutoTokenizer.from_pretrained(model_name, device_map="auto")
 
-        model = outlines.from_transformers(
-            hf_model,
-            hf_tokenizer
-        )
+        model = outlines.from_transformers(hf_model, hf_tokenizer)
 
         self.model = model
         self.hf_model = hf_model
@@ -341,18 +354,22 @@ class OutlinesLocalLLM(LLM):
 
         input_ids = self.hf_tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
 
-        for _ in range(max_trials):
+        for i in range(max_trials):
             try:
                 output = self.model(input_ids, JsonSchema(schema) if schema else str)
 
                 if schema is not None:
                     _check_schema(output, schema)
+                
+                return output
 
             except Exception as e:
-                print(f"Error during generation: {e}. Retrying...")
-                continue
-
-            return output
+                print(f"Error during generation: {e}.")
+                if i < max_trials - 1:
+                    print(f"Retrying... ({i + 1}/{max_trials})")
+                    continue
+                else:
+                    raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
 
         raise RuntimeError(f"Failed to generate a valid response after {max_trials} trials.")
 
