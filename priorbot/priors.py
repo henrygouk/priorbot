@@ -73,7 +73,7 @@ class UniformPrior(Prior):
                 samples_dict[key] = np.random.choice(value["enum"], size=n_samples)
             elif val_type == "integer" or val_type == "number":
                 if value.get("minimum") is None or value.get("maximum") is None:
-                    raise ValueError(f"Minimum and maximum must be specified for integer type {key}")
+                    raise ValueError(f"Minimum and maximum must be specified for numeric type {key}")
                 if val_type == "integer":
                     samples_dict[key] = np.random.randint(value["minimum"], value["maximum"] + 1, size=n_samples)
                 else:  # number
