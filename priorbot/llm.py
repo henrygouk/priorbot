@@ -75,11 +75,15 @@ def _check_json_schema_value(value: Any, subschema: dict[str, Any], key: str) ->
     """Validate a single value against a JSON-schema subschema."""
     val_type = subschema.get("type")
     if val_type in ("number", "integer"):
+        if not isinstance(value, (int, float) if val_type == "number" else int) or isinstance(value, bool):
+            raise ValueError(f"Value {value} for key {key} is not a {val_type} value for schema {subschema}")
         lo = subschema.get("minimum")
         hi = subschema.get("maximum")
         if (lo is not None and value < lo) or (hi is not None and value > hi):
             raise ValueError(f"Value {value} for key {key} is out of bounds for schema {subschema}")
     elif val_type == "string":
+        if not isinstance(value, str):
+            raise ValueError(f"Value {value} for key {key} is not a string for schema {subschema}")
         enum = subschema.get("enum")
         if enum is not None and value not in enum:
             raise ValueError(f"Value {value} for key {key} is not in enum {enum} for schema {subschema}")
