@@ -383,10 +383,10 @@ class GibbsLLMPrior(AsyncPrior):
             samples.append(new_sample)
 
             if verbose:
-                print(f"Generated {len(samples[self.burn_in + 1::self.thinning][:n_samples])}/{n_samples} samples.")
+                print(f"Generated {len(samples[self.burn_in + self.thinning::self.thinning][:n_samples])}/{n_samples} samples.")
                 print(f"Current sample: {samples[-1]}")
 
-        thinned_samples = samples[self.burn_in + 1::self.thinning][:n_samples]  # + 1 to skip the initial sample
+        thinned_samples = samples[self.burn_in + self.thinning::self.thinning][:n_samples]
         return thinned_samples
 
 
@@ -586,9 +586,9 @@ class MCMCLLMPrior(AsyncPrior):
                 raise e
 
             if verbose:
-                print(f"Generated {len(samples[self.burn_in + 1::self.thinning][:n_samples])}/{n_samples} samples.")
+                print(f"Generated {len(samples[self.burn_in + self.thinning::self.thinning][:n_samples])}/{n_samples} samples.")
 
-        thinned_samples = samples[self.burn_in + 1::self.thinning][:n_samples]  # Drop the initial sample
+        thinned_samples = samples[self.burn_in + self.thinning::self.thinning][:n_samples]
         return thinned_samples
 
     @abstractmethod
@@ -852,10 +852,10 @@ class MetropolisWithinGibbsLLMPrior(MCMCLLMPrior):
                 raise e
 
             if verbose:
-                print(f"Generated {len(samples[self.burn_in + 1::self.thinning][:n_samples])}/{n_samples} samples.")
+                print(f"Generated {len(samples[self.burn_in + self.thinning::self.thinning][:n_samples])}/{n_samples} samples.")
                 print(f"Current sample: {samples[-1]}")
 
-        thinned_samples = samples[self.burn_in + 1::self.thinning][:n_samples]  # Skip the initial sample
+        thinned_samples = samples[self.burn_in + self.thinning::self.thinning][:n_samples]
         return thinned_samples
 
 
