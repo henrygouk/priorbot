@@ -291,21 +291,19 @@ class LLMPrior(AsyncPrior):
             range(n_samples), disable=pbar is None, position=pbar, desc=f"Worker {pbar}", dynamic_ncols=True
         ):
 
+            gen_schema = schema.copy()
             if self.shuffle_variables:
-                keys = list(schema["properties"].keys())
+                keys = list(gen_schema["properties"].keys())
                 np.random.shuffle(keys)
-                schema["properties"] = {k: schema["properties"][k] for k in keys}
-                schema["required"] = keys
+                gen_schema["properties"] = {k: gen_schema["properties"][k] for k in keys}
+                gen_schema["required"] = keys
 
             if self.manual_reasoning:
-                gen_schema = deepcopy(schema)
                 gen_schema["properties"] = {
                     "reasoning": {"type": "string", "description": self.reasoning_prompt},
                     **gen_schema["properties"],
                 }
                 gen_schema["required"] = ["reasoning"] + gen_schema["required"]
-            else:
-                gen_schema = schema
 
             prompt = self.template(gen_schema, observed)
             sample = self.llm.generate(prompt, gen_schema, verbose)
@@ -364,7 +362,12 @@ class GibbsLLMPrior(AsyncPrior):
                 keys_to_discard = keys[-self.block_size:]
             else:
                 if len(keys_pool) < self.block_size:
-                    keys_pool = keys_pool + keys
+                    pending = set(keys_pool)
+                    keys_pool = (
+                        keys_pool
+                        + [k for k in keys if k not in pending]
+                        + [k for k in keys if k in pending]
+                    )
 
                 keys_to_discard = keys_pool[:self.block_size]
                 keys_pool = keys_pool[self.block_size:]
@@ -789,13 +792,13 @@ class MetropolisWithinGibbsLLMPrior(MCMCLLMPrior):
                 keys_to_discard = keys[-self.block_size:]
             else:
                 if len(keys_pool) < self.block_size:
-                    keys_pool = keys_pool + keys
+                    keys_pool = keys_pool + [k for k in keys if k not in keys_pool]
 
                 keys_to_discard = keys_pool[:self.block_size]
                 keys_pool = keys_pool[self.block_size:]
 
             itr_discard = {k: itr_observed[k] for k in keys_to_discard}
-            itr_observed = {k: itr_observed[k] for k in itr_observed if k not in keys_to_discard}
+            itr_observed = {k: itr_observed[k] for k in keys if k not in keys_to_discard}
 
             itr_schema = {
                 "type": "object",
